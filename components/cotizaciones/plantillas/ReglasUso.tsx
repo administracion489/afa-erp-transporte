@@ -5,14 +5,17 @@
 // (lib/cotizacion-plantillas.ts), el mismo motor que usan /cotizaciones y la IA. Aquí solo se escribe
 // la celda —pidiendo la fila de vuelta: con RLS, sin el módulo, la escritura vuelve vacía— y se
 // enseña el resultado, en ámbar cuando la regla escrita no es la que se usa.
+// Con supabase/cotizaciones-09 (`reglasTraslado !== null`) el traslado de la IA se elige por idioma ×
+// moneda en su propia cuadrícula (ReglasTraslado.tsx): esta no pinta la fila «Traslado de la IA» y
+// dice que esas reglas viejas quedaron sin uso. Sin ese SQL, la fila sigue aquí, como siempre.
 
 import { useState } from "react";
 import { supabase } from "@/lib/supabase";
 import {
   DESCRIPCION_SEGMENTO, DESCRIPCION_SERVICIO, ETIQUETA_DISENO, ETIQUETA_SEGMENTO, ETIQUETA_SERVICIO,
-  SEGMENTOS, SERVICIOS_PLANTILLA, TABLA_REGLAS, disenoDe, esActiva, etiquetaCelda, plantillaParaUso,
+  SEGMENTOS, SERVICIOS_PLANTILLA, SQL_REGLAS_TRASLADO, TABLA_REGLAS, disenoDe, esActiva, etiquetaCelda, plantillaParaUso,
   plantillaPorId, plantillaPrincipal, sirveParaIA,
-  type PlantillaFila, type ReglaPlantilla, type Segmento, type ServicioPlantilla,
+  type PlantillaFila, type ReglaPlantilla, type ReglaTraslado, type Segmento, type ServicioPlantilla,
 } from "@/lib/cotizacion-plantillas";
 import type { PerfilEmpresa } from "@/lib/empresa-perfil";
 import { SIN_PERMISO_COTIZACIONES, filasDeVuelta, lineasConfirmTraslado } from "./pantalla";
@@ -20,9 +23,11 @@ import { SIN_PERMISO_COTIZACIONES, filasDeVuelta, lineasConfirmTraslado } from "
 const clave = (s: ServicioPlantilla, g: Segmento) => `${s}|${g}`;
 const nombre = (p: PlantillaFila) => `«${p.nombre || p.id}»`;
 
-export function ReglasUso({ plantillas, reglas, onCambio, aviso, perfil }: {
+export function ReglasUso({ plantillas, reglas, reglasTraslado, onCambio, aviso, perfil }: {
   plantillas: PlantillaFila[];
   reglas: ReglaPlantilla[];
+  /** La regla del traslado por idioma × moneda (cotizaciones-09). null = falta su tabla: la fila «Traslado de la IA» sigue aquí. */
+  reglasTraslado: ReglaTraslado[] | null;
   /** El perfil de la empresa (sus cuentas); undefined mientras carga o si no se pudo leer. */
   perfil?: PerfilEmpresa | null;
   /** Vuelve a leer plantillas y reglas. */
@@ -32,6 +37,10 @@ export function ReglasUso({ plantillas, reglas, onCambio, aviso, perfil }: {
   const [guardando, setGuardando] = useState<string | null>(null);
   const [errores, setErrores] = useState<Record<string, string>>({});
   const principal = plantillaPrincipal(plantillas);
+  // Con la regla nueva, la fila del traslado de la IA la pinta ReglasTraslado: aquí no se ofrece.
+  const trasladoAparte = reglasTraslado !== null;
+  const servicios = trasladoAparte ? SERVICIOS_PLANTILLA.filter(s => s !== "traslado_ia") : SERVICIOS_PLANTILLA;
+  const viejasTraslado = reglas.filter(r => r.servicio === "traslado_ia").length;
 
   const guardar = async (servicio: ServicioPlantilla, segmento: Segmento, nuevo: string) => {
     const k = clave(servicio, segmento);
@@ -98,7 +107,7 @@ export function ReglasUso({ plantillas, reglas, onCambio, aviso, perfil }: {
           </tr>
         </thead>
         <tbody>
-          {SERVICIOS_PLANTILLA.map(s => {
+          {servicios.map(s => {
             const opciones = plantillas.filter(p => esActiva(p) && (s !== "traslado_ia" || sirveParaIA(p)));
             return (
               <tr key={s}>
@@ -154,6 +163,15 @@ export function ReglasUso({ plantillas, reglas, onCambio, aviso, perfil }: {
           })}
         </tbody>
       </table>
+      {trasladoAparte ? (
+        <p style={{ margin: "2px 8px 0", fontSize: 11, color: "#475569", background: "#eef3f8", borderRadius: 8, padding: "6px 10px" }}>
+          El traslado de la IA ya no se elige aquí por tipo de cliente: se elige por idioma y moneda, abajo.{viejasTraslado > 0 ? ` ${viejasTraslado === 1 ? "Su regla vieja queda guardada" : `Sus ${viejasTraslado} reglas viejas quedan guardadas`} en la base, sin uso.` : ""}
+        </p>
+      ) : (
+        <p style={{ margin: "2px 8px 0", fontSize: 11, color: "#475569", background: "#eef3f8", borderRadius: 8, padding: "6px 10px" }}>
+          Para elegir la plantilla del traslado de la IA por idioma y moneda —y que la IA pueda cotizar en inglés— falta correr {SQL_REGLAS_TRASLADO} en Supabase (el despliegue no lo corre). Mientras tanto, la IA cotiza siempre en castellano con la fila «Traslado de la IA» de arriba.
+        </p>
+      )}
     </div>
   );
 }

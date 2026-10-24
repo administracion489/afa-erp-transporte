@@ -8,7 +8,10 @@ import {
 import {
   atencionDe, atencionValida, atencionEnUso, problemaAtencion, describirAtencion, describirDias,
   dentroDeAtencion, proximaAtencion, fraseFueraDeAtencion, PROBLEMA_ATENCION, type Atencion,
+  aLas, nombreDia, aperturaSiguiente, fechaMediaIngles,
 } from "../lib/crm-ia-atencion";
+import { diaSemanaLima } from "../lib/comisiones/calendario";
+import type { Tratamiento } from "../lib/crm-ia-ajustes";
 let fallos = 0;
 const ok = (c: boolean, m: string) => { if (!c) { fallos++; console.log("✗", m); } else console.log("✓", m); };
 ok(JSON.stringify(normalizarAjustes(null)) === JSON.stringify(AJUSTES_DEFECTO), "null → defectos");
@@ -272,6 +275,164 @@ ok(fraseFueraDeAtencion(LUN_SAB, "2026-13-45", "18:00", "usted") === "", "fecha 
       }
   ok(malos === 0, `barrido del horario sin contradicciones (${dentro} dentro · ${fuera} fuera)`);
   ok(dentro > 0 && fuera > 0, "corolario: el barrido encuentra momentos dentro Y fuera");
+}
+// ── En inglés (`idioma = "en"`), y el castellano intacto ─────────────────────────────────────────
+// Las frases de antes del inglés (lib/crm-ia-atencion.ts y la derivación de lib/crm-ia-ajustes.ts de
+// 93c594b), copiadas LITERAL: sin idioma —y con «es»— tienen que salir byte a byte iguales. En
+// inglés: una sola versión (el trato no cuenta), sin castellano filtrado, con las mismas horas y los
+// mismos días que el castellano.
+{
+  const NOMBRE_DIA_V = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
+  const ORDEN_V = [1, 2, 3, 4, 5, 6, 0];
+  const posicionV = (d: number) => ORDEN_V.indexOf(d);
+  const listaV = (items: string[]) => (items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} y ${items[items.length - 1]}`);
+  const describirDiasV = (dias: number[]): string => {
+    const sel = new Set((Array.isArray(dias) ? dias : []).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6));
+    if (sel.size === 0) return "ningún día";
+    if (sel.size === 7) return "todos los días";
+    if (sel.size === 1) {
+      const [d] = [...sel];
+      return `los ${NOMBRE_DIA_V[d]}${NOMBRE_DIA_V[d].endsWith("s") ? "" : "s"}`;
+    }
+    const abreTramo = (d: number) => sel.has(d) && !sel.has(ORDEN_V[(posicionV(d) + 6) % 7]);
+    let inicio = ORDEN_V.find(abreTramo)!;
+    if (sel.has(1)) {
+      let p = posicionV(1);
+      while (sel.has(ORDEN_V[(p + 6) % 7])) p = (p + 6) % 7;
+      inicio = ORDEN_V[p];
+    }
+    const tramos: number[][] = [];
+    for (let k = 0, p = posicionV(inicio); k < 7; k++, p = (p + 1) % 7) {
+      const d = ORDEN_V[p];
+      if (!sel.has(d)) continue;
+      const ultimo = tramos[tramos.length - 1];
+      if (ultimo && ultimo[ultimo.length - 1] === ORDEN_V[(p + 6) % 7]) ultimo.push(d);
+      else tramos.push([d]);
+    }
+    const items = tramos.flatMap((t) =>
+      t.length >= 3 ? [`de ${NOMBRE_DIA_V[t[0]]} a ${NOMBRE_DIA_V[t[t.length - 1]]}`] : t.map((d) => NOMBRE_DIA_V[d]),
+    );
+    return listaV(items);
+  };
+  const describirAtencionV = (at: Atencion): string => `${describirDiasV(at.dias)}, de ${at.desde} a ${at.hasta}`;
+  const aLasV = (hhmm: string) => (hhmm.startsWith("01:") ? `la ${hhmm}` : `las ${hhmm}`);
+  const nombreDiaV = (d: number): string => NOMBRE_DIA_V[((Math.trunc(d) % 7) + 7) % 7];
+  const proximaAtencionV = (at: Atencion, fecha: string, hhmm: string): string | null => {
+    const a = aperturaSiguiente(at, fecha, hhmm);
+    if (!a) return null;
+    if (a.ahora) return "ahora";
+    const abre = `desde ${aLasV(a.desde)}`;
+    if (a.k === 0) return `hoy ${abre}`;
+    const d = diaSemanaLima(a.fecha);
+    if (a.k === 1) return `mañana ${NOMBRE_DIA_V[d]} ${abre}`;
+    return `${a.k === 7 ? "el próximo" : "el"} ${NOMBRE_DIA_V[d]} ${abre}`;
+  };
+  const fraseFueraV = (at: Atencion, fecha: string, hhmm: string, t: Tratamiento): string => {
+    if (!atencionEnUso(at) || dentroDeAtencion(at, fecha, hhmm)) return "";
+    const prox = proximaAtencionV(at, fecha, hhmm);
+    if (!prox || prox === "ahora") return "";
+    return ` Nuestro horario de atención es ${describirAtencionV(at)}; un ejecutivo ${t === "tu" ? "te" : "le"} responderá ${prox}.`;
+  };
+  const DERIVACION_EN = "Thank you, {nombre}. I've registered your request; one of our agents is reviewing it and will send you the information in this chat shortly. 🙌";
+  const DIA_EN = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const FUGA = /(?<![\p{L}\p{N}])(?:de|del|la|las|el|los|y|o|desde|hoy|mañana|próximo|ningún|todos|días|horario|atención|ejecutivo|le|te|su|usted|responderá|gracias|solicitud|equipo|lunes|martes|miércoles|jueves|viernes|sábado|domingo)(?![\p{L}\p{N}])|[áéíóúñ¿¡]/iu;
+  const horasDe = (x: string) => (x.match(/\d{2}:\d{2}/g) ?? []).join(",");
+
+  // (1) El castellano, byte a byte el de antes.
+  const subsets: number[][] = [];
+  for (let mask = 0; mask < 128; mask++) subsets.push([0, 1, 2, 3, 4, 5, 6].filter((dd) => mask & (1 << dd)));
+  subsets.push([1, 1, 3], [7, -1, 2.5, 3] as number[]);
+  let distintas = 0, n = 0;
+  for (const sub of subsets) {
+    n++;
+    if (describirDias(sub) !== describirDiasV(sub) || describirDias(sub, "es") !== describirDiasV(sub)) distintas++;
+    for (const [de, a] of [["09:00", "17:00"], ["01:00", "05:00"], ["00:00", "23:59"]]) {
+      const at = AT(sub, de, a);
+      if (describirAtencion(at) !== describirAtencionV(at) || describirAtencion(at, "es") !== describirAtencionV(at)) distintas++;
+    }
+  }
+  for (const h of ["01:00", "01:30", "09:00", "00:00", "13:05", "10:01"]) if (aLas(h) !== aLasV(h) || aLas(h, "es") !== aLasV(h)) distintas++;
+  for (let dd = -8; dd <= 13; dd++) if (nombreDia(dd) !== nombreDiaV(dd) || nombreDia(dd, "es") !== nombreDiaV(dd)) distintas++;
+  const horarios = [LUN_SAB, AT([1, 3, 5]), AT([0, 6], "08:00", "13:30"), AT([0, 1, 2, 3, 4, 5, 6], "00:00", "23:59"), AT([1]), AT([1, 2], "01:00", "05:00"), AT([1, 2, 3, 4, 5, 6], "09:00", "17:00", false), AT([]), AT([1, 2, 3], "17:00", "09:00")];
+  const fechas = ["2026-10-18", "2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23", "2026-10-24", "2026-13-45", "24-10-2026"];
+  let fueraEs = 0, fueraEn = 0, prox7 = 0;
+  for (const at of horarios) for (const fecha of fechas) for (let m = 0; m < 1440; m += 15) {
+    const hh = `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+    n++;
+    const pv = proximaAtencionV(at, fecha, hh);
+    if (proximaAtencion(at, fecha, hh) !== pv || proximaAtencion(at, fecha, hh, "es") !== pv) distintas++;
+    for (const tr of ["usted", "tu"] as const) {
+      const fv = fraseFueraV(at, fecha, hh, tr);
+      if (fraseFueraDeAtencion(at, fecha, hh, tr) !== fv || fraseFueraDeAtencion(at, fecha, hh, tr, "es") !== fv) distintas++;
+    }
+    // (2) En inglés: la misma decisión, el mismo día y la misma hora; sin castellano.
+    const pe = proximaAtencion(at, fecha, hh, "en");
+    const fe = fraseFueraDeAtencion(at, fecha, hh, "usted", "en");
+    if ((pe === null) !== (pv === null)) ok(false, `próxima en/es: null en uno solo (${fecha} ${hh})`);
+    if (pv !== null && pe !== null) {
+      if ((pv === "ahora") !== (pe === "now")) ok(false, `«ahora» ⟺ «now» (${fecha} ${hh})`);
+      if (horasDe(pv) !== horasDe(pe)) ok(false, `la misma hora (${pv} · ${pe})`);
+      const dEs = NOMBRE_DIA_V.findIndex((x) => pv.includes(` ${x} `)), dEn = DIA_EN.findIndex((x) => pe.includes(` ${x}`));
+      if (dEs !== dEn) ok(false, `el mismo día (${pv} · ${pe})`);
+      if (pv.startsWith("hoy") !== pe.startsWith("today") || pv.startsWith("mañana") !== pe.startsWith("tomorrow") || pv.startsWith("el próximo") !== pe.startsWith("next")) ok(false, `la misma forma (${pv} · ${pe})`);
+      if (pe.startsWith("next")) prox7++;
+      if (FUGA.test(pe)) ok(false, `próxima en sin castellano: «${pe}»`);
+    }
+    if (fe !== fraseFueraDeAtencion(at, fecha, hh, "tu", "en")) ok(false, "frase fuera en inglés: el trato no cuenta");
+    const fv = fraseFueraV(at, fecha, hh, "usted");
+    if ((fe === "") !== (fv === "")) ok(false, `frase fuera: vacía en uno solo (${fecha} ${hh})`);
+    if (fv) { fueraEs++; if (fe) fueraEn++; }
+    if (fe && (!fe.startsWith(" Our business hours are ") || !fe.includes(` (Lima time); an agent will reply ${pe}.`) || horasDe(fe) !== horasDe(fv) || FUGA.test(fe))) ok(false, `frase fuera en inglés: «${fe}»`);
+  }
+  ok(distintas === 0, `castellano sin idioma y con «es» ≡ el de 93c594b (${n} casos)`);
+  ok(fueraEs > 0 && fueraEn === fueraEs && prox7 > 0, `corolario: el barrido dice frases fuera de horario (${fueraEn}) y «next …»`);
+  ok(mensajeDerivacionDefecto("usted", "es") === mensajeDerivacionDefecto("usted") && mensajeDerivacionDefecto("tu", "es") === DERIVACION_DE_HOY, "derivación con «es» = la de siempre");
+  ok(mensajeDerivacionDefecto("usted", "en") === DERIVACION_EN && mensajeDerivacionDefecto("tu", "en") === DERIVACION_EN, "derivación en inglés: una versión, con {nombre}");
+  ok(!FUGA.test(DERIVACION_EN.replace("{nombre}", "")), "derivación en inglés sin castellano");
+
+  // (3) En inglés, por sus formas.
+  ok(describirDias([1, 2, 3, 4, 5, 6], "en") === "Monday to Saturday", "en: lun-sáb");
+  ok(describirDias([1, 3, 5], "en") === "Monday, Wednesday and Friday", "en: días sueltos");
+  ok(describirDias([0, 6], "en") === "Saturday and Sunday" && describirDias([6, 0, 1], "en") === "Saturday to Monday", "en: fin de semana y la vuelta");
+  ok(describirDias([1, 2, 3, 5], "en") === "Monday to Wednesday and Friday" && describirDias([1, 2, 3, 5, 6], "en") === "Monday to Wednesday, Friday and Saturday", "en: tramo y sueltos");
+  ok(describirDias([6], "en") === "Saturdays" && describirDias([1], "en") === "Mondays", "en: un solo día");
+  ok(describirDias([0, 1, 2, 3, 4, 5, 6], "en") === "every day" && describirDias([], "en") === "no days", "en: todos y ninguno");
+  // Oráculo: el inglés es el castellano palabra por palabra (los mismos tramos, en el mismo orden).
+  {
+    let malos = 0;
+    for (const sub of subsets) {
+      const es = describirDiasV(sub), en = describirDias(sub, "en");
+      const sel = new Set(sub.filter((x) => Number.isInteger(x) && x >= 0 && x <= 6));
+      const esperado = sel.size === 1 ? `${DIA_EN[[...sel][0]]}s`
+        : es.replace("todos los días", "every day").replace("ningún día", "no days")
+          .replace(/de (\p{L}+) a (\p{L}+)/gu, "$1 to $2").replace(/ y /g, " and ")
+          .replace(/\p{L}+/gu, (w) => (NOMBRE_DIA_V.includes(w) ? DIA_EN[NOMBRE_DIA_V.indexOf(w)] : w));
+      if (en !== esperado || FUGA.test(en)) malos++;
+    }
+    ok(malos === 0, `describirDias en inglés ≡ el castellano traducido tramo por tramo (${subsets.length} conjuntos)`);
+  }
+  ok(describirAtencion(LUN_SAB, "en") === "Monday to Saturday, from 09:00 to 17:00 (Lima time)", "en: describir el horario con «(Lima time)»");
+  ok(proximaAtencion(LUN_SAB, "2026-10-24", "18:00", "en") === "on Monday from 09:00", "en: sábado 18:00 → on Monday");
+  ok(proximaAtencion(LUN_SAB, "2026-10-18", "10:00", "en") === "tomorrow, Monday, from 09:00", "en: domingo → tomorrow, Monday");
+  ok(proximaAtencion(LUN_SAB, "2026-10-19", "08:00", "en") === "today from 09:00" && proximaAtencion(LUN_SAB, "2026-10-19", "10:00", "en") === "now", "en: today / now");
+  ok(proximaAtencion(AT([1]), "2026-10-19", "18:00", "en") === "next Monday from 09:00", "en: una semana entera → next Monday");
+  ok(proximaAtencion(AT([1, 2], "01:00", "05:00"), "2026-10-19", "00:30", "en") === "today from 01:00", "en: 01:00 sin artículo");
+  ok(proximaAtencion(LUN_SAB, "24-10-2026", "18:00", "en") === null, "en: fecha que no se entiende → null");
+  ok(fraseFueraDeAtencion(LUN_SAB, "2026-10-24", "18:00", "usted", "en") === " Our business hours are Monday to Saturday, from 09:00 to 17:00 (Lima time); an agent will reply on Monday from 09:00.", "en: frase fuera de horario");
+  ok(fraseFueraDeAtencion(LUN_SAB, "2026-10-19", "10:00", "usted", "en") === "" && fraseFueraDeAtencion(AT([1, 2, 3, 4, 5, 6], "09:00", "17:00", false), "2026-10-24", "18:00", "tu", "en") === "", "en: dentro o apagado, sin frase");
+  ok(aLas("01:00", "en") === "01:00" && aLas("09:00", "en") === "09:00" && nombreDia(1, "en") === "Monday" && nombreDia(-1, "en") === "Saturday", "en: aLas y nombreDia");
+  // fechaMediaIngles: la del navegador en inglés, sin depender del huso.
+  {
+    let malas = 0;
+    for (let dd = 0; dd < 366; dd++) {
+      const d = new Date(Date.UTC(2026, 0, 1 + dd)), iso = d.toISOString().slice(0, 10);
+      const ref = d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+      if (fechaMediaIngles(iso) !== ref) malas++;
+    }
+    ok(malas === 0, "fechaMediaIngles ≡ toLocaleDateString en-US (un año entero)");
+  }
+  ok(fechaMediaIngles("2026-10-25") === "Oct 25, 2026" && fechaMediaIngles("2026-10-25", false) === "Oct 25", "fechaMediaIngles con y sin año");
+  ok(fechaMediaIngles(null) === null && fechaMediaIngles("25/10/2026") === null && fechaMediaIngles("2026-13-01") === null, "fechaMediaIngles: lo que no es una fecha → null");
 }
 console.log(fallos ? `\n${fallos} fallo(s)` : "\nTodo OK");
 process.exit(fallos ? 1 : 0);

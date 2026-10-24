@@ -73,10 +73,10 @@ ok(/no contradice «NUNCA confirmes/.test(BLOQUE_TRASLADOS) && conT.includes("NU
 {
   const ag = { mensaje_derivacion: "Hola {nombre}, un ejecutivo te escribe por este chat." };
   const ct = { nombre: "Paola Huarachi" };
-  const auto = textoSinImportesAjenos("El total sería 150 (IGV incluido)", { respuestaModelo: "", accion: "cotizar", cotizacion: { cotizacionId: 1, numero: "00123", decision: "automatico", figuras: [283.2], total: "S/ 283.20", validez: "18/11/2026" } }, ag, ct);
+  const auto = textoSinImportesAjenos("El total sería 150 (IGV incluido)", { respuestaModelo: "", accion: "cotizar", cotizacion: { cotizacionId: 1, numero: "00123", decision: "automatico", figuras: [283.2], total: "S/ 283.20", validez: "18/11/2026", idioma: "es" } }, ag, ct);
   // ADAPTADA (21-10-2026): el mensaje de la cotización ya no saluda ni usa el nombre del perfil.
   ok(auto.startsWith("Le envío la cotización N° 00123") && !/Paola|hola/i.test(auto) && auto.includes("S/ 283.20") && !auto.includes("150"), "con cotización, el texto del código (sin la cifra del modelo, sin saludo)");
-  const rev = textoSinImportesAjenos("Serán aprox 300", { respuestaModelo: "", accion: "cotizar", cotizacion: { cotizacionId: 1, numero: "00124", decision: "revision", figuras: [] } }, ag, ct);
+  const rev = textoSinImportesAjenos("Serán aprox 300", { respuestaModelo: "", accion: "cotizar", cotizacion: { cotizacionId: 1, numero: "00124", decision: "revision", figuras: [], idioma: "es" } }, ag, ct);
   ok(rev.includes("00124") && !/\d{3}(?!\d)/.test(rev.replace("00124", "")), "en revisión, el del código sin importes");
   const preg = textoSinImportesAjenos("Te sale gratis el retorno, ¿cuántas maletas?", { respuestaModelo: "", accion: "preguntar", faltan: ["la cantidad de maletas"] }, ag, ct);
   // ADAPTADA: el agente sin `comportamiento.tratamiento` es de USTED (el defecto del ajuste), y el
@@ -99,7 +99,7 @@ ok(/no contradice «NUNCA confirmes/.test(BLOQUE_TRASLADOS) && conT.includes("NU
   ok(preg({ tratamiento: "tu", preguntas: "todo_junto" }) === "Para cotizar tu traslado me falta: la cantidad de maletas; la hora de recojo.", "tú + todo junto");
   ok(preg({ tratamiento: "tu", preguntas: "una_por_mensaje" }) === "Para cotizar tu traslado, ¿me indicas la cantidad de maletas?", "tú + uno por mensaje");
   ok(preg({ tratamiento: "usted", preguntas: "una_por_mensaje" }) === "Para cotizar su traslado, ¿me indica la cantidad de maletas?", "usted + uno por mensaje");
-  const cot = { respuestaModelo: "", accion: "cotizar" as const, cotizacion: { cotizacionId: 1, numero: "7", decision: "revision" as const, figuras: [] } };
+  const cot = { respuestaModelo: "", accion: "cotizar" as const, cotizacion: { cotizacionId: 1, numero: "7", decision: "revision" as const, figuras: [], idioma: "es" as const } };
   ok(textoSinImportesAjenos("x", cot, { comportamiento: { tratamiento: "tu" } }, ct).startsWith("Registré tu pedido"), "cotización de tú");
   ok(textoSinImportesAjenos("x", cot, {}, ct).startsWith("Registré su pedido"), "cotización de usted (el defecto)");
   // La derivación por defecto (sin plantilla del dueño) también lee el trato.
@@ -336,6 +336,57 @@ ok(trasladosDeConfig(null) === null, "traslados: sin configuración → null");
   }
   ok(bloqueTraslados("todo_junto", {}) === BLOQUE_TRASLADOS && bloqueTraslados("una_por_mensaje", { reserva: false }) === bloqueTraslados("una_por_mensaje"), "bloqueTraslados sin reserva: el de siempre");
   ok(bloqueTraslados("todo_junto").includes(FRASE_PROPONER_RESERVA_TRASLADOS), "la frase que reemplaza la reserva sigue en el bloque de hoy");
+}
+// ── El inglés (22-10-2026): el prompt cambia SOLO con el inglés encendido; los textos del código en inglés ──
+// Sin `ingles`, el bloque de traslados y el prompt entero son byte a byte los de antes (los casos de
+// arriba no se tocaron). Con él cambia exactamente la línea de la moneda y se agrega la del idioma.
+{
+  const { LINEA_MONEDA_TRASLADOS, LINEA_MONEDA_TRASLADOS_INGLES, LINEA_IDIOMA_TRASLADOS } = await import("../lib/crm-ia");
+  const deshacer = (b: string) => b.replace(LINEA_MONEDA_TRASLADOS_INGLES, LINEA_MONEDA_TRASLADOS).replace(LINEA_IDIOMA_TRASLADOS + "\n", "");
+  for (const p of ["todo_junto", "una_por_mensaje"] as ModoPreguntas[]) for (const reserva of [false, true]) {
+    const sin = bloqueTraslados(p, { reserva }), con = bloqueTraslados(p, { reserva, ingles: true });
+    ok(bloqueTraslados(p, { reserva, ingles: false }) === sin, `bloque (${p}, reserva ${reserva}): ingles:false es el de siempre`);
+    ok(con !== sin && con.includes(LINEA_MONEDA_TRASLADOS_INGLES) && con.includes(LINEA_IDIOMA_TRASLADOS) && !con.includes(LINEA_MONEDA_TRASLADOS), `bloque (${p}, reserva ${reserva}): con inglés, la línea de la moneda cambia y se agrega la del idioma`);
+    ok(deshacer(con) === sin, `bloque (${p}, reserva ${reserva}): fuera de esas dos líneas, nada más cambia`);
+    ok(con.indexOf(LINEA_IDIOMA_TRASLADOS) > con.indexOf(LINEA_MONEDA_TRASLADOS_INGLES) && con.endsWith("\n"), `bloque (${p}, reserva ${reserva}): la del idioma va al final del bloque`);
+  }
+  ok(BLOQUE_TRASLADOS.includes(LINEA_MONEDA_TRASLADOS) && !BLOQUE_TRASLADOS.includes(LINEA_IDIOMA_TRASLADOS), "BLOQUE_TRASLADOS (el de siempre) no habla de inglés");
+  ok(!/\d+\s*%|S\/\s*\d|US\$\s*\d/.test(LINEA_MONEDA_TRASLADOS_INGLES + LINEA_IDIOMA_TRASLADOS), "las líneas nuevas no llevan montos");
+  for (const ag of [agente, { ...agente, comportamiento: { tratamiento: "tu", preguntas: "una_por_mensaje" } }]) {
+    const sinI = construirSystem(ag, contacto, conv, true, "AFA Transportes", { traslados: true });
+    const conI = construirSystem(ag, contacto, conv, true, "AFA Transportes", { traslados: true, ingles: true });
+    ok(construirSystem(ag, contacto, conv, true, "AFA Transportes", { traslados: true, ingles: false }) === sinI, "prompt: ingles:false es byte a byte el de siempre");
+    ok(deshacer(conI) === sinI, "prompt: con inglés, fuera de las dos líneas del bloque de traslados, el mismo");
+    ok(construirSystem(ag, contacto, conv, true, "AFA Transportes", { traslados: false, ingles: true }) === construirSystem(ag, contacto, conv, true, "AFA Transportes", { traslados: false }),
+      "prompt: sin traslados, el inglés no cambia nada");
+  }
+
+  // La derivación en inglés: la del sistema (la plantilla del dueño está en castellano y no se traduce).
+  const ct = { nombre: "paola huarachi" };
+  const SAB_18 = { fecha: "2026-10-24", hora: "18:00" }, LUN_10 = { fecha: "2026-10-19", hora: "10:00" };
+  const atencion = { atencion_activa: true, atencion_dias: [1, 2, 3, 4, 5, 6], atencion_desde: "09:00", atencion_hasta: "17:00" };
+  const EN = mensajeDerivacionDefecto("usted", "en").replace("{nombre}", "Paola");
+  ok(mensajeDerivacion({}, ct, LUN_10, { idioma: "en" }) === EN, `derivación en inglés: la del sistema (${EN})`);
+  ok(mensajeDerivacionDefecto("tu", "en") === mensajeDerivacionDefecto("usted", "en"), "en inglés hay una sola versión (sin usted ni tú)");
+  ok(mensajeDerivacion({ mensaje_derivacion: "Hola {nombre}, ya te atiende un ejecutivo.{atencion}" }, ct, LUN_10, { idioma: "en" }) === EN, "la plantilla propia del dueño no se usa en inglés");
+  ok(mensajeDerivacion({ mensaje_derivacion: "Hola {nombre}, ya te atiende un ejecutivo." }, ct, LUN_10) === "Hola Paola, ya te atiende un ejecutivo.", "sin idioma, la plantilla del dueño como siempre");
+  ok(mensajeDerivacion({ comportamiento: { tratamiento: "tu" } }, ct, SAB_18, {}) === mensajeDerivacion({ comportamiento: { tratamiento: "tu" } }, ct, SAB_18), "opts vacío: byte a byte");
+  const fuera = mensajeDerivacion({ comportamiento: atencion }, ct, SAB_18, { idioma: "en" });
+  ok(fuera.startsWith(EN) && fuera.length > EN.length && !/horario|ejecutivo|lunes|usted|responder/i.test(fuera), `fuera del horario, en inglés y sin castellano («${fuera}»)`);
+  ok(mensajeDerivacion({ comportamiento: atencion }, ct, LUN_10, { idioma: "en" }) === EN, "dentro del horario, en inglés: sin la frase");
+
+  // textoSinImportesAjenos: el idioma de la cotización manda; sin cotización, el del turno.
+  const ag = { mensaje_derivacion: "Hola {nombre}, un ejecutivo te escribe por este chat." };
+  const der = textoSinImportesAjenos("Son 150$", { respuestaModelo: "", accion: "derivar" }, ag, ct, "en");
+  ok(der === mensajeDerivacion(ag, ct, undefined, { idioma: "en" }) && !/Hola|ejecutivo/.test(der), `derivar en el turno en inglés: la derivación en inglés («${der}»)`);
+  ok(textoSinImportesAjenos("Son 150$", { respuestaModelo: "", accion: "derivar" }, ag, ct) === textoSinImportesAjenos("Son 150$", { respuestaModelo: "", accion: "derivar" }, ag, ct, "es"),
+    "sin idioma del turno, castellano (byte a byte)");
+  const preg = textoSinImportesAjenos("It is free, how many bags?", { respuestaModelo: "", accion: "preguntar", faltan: ["la cantidad de maletas"] }, ag, ct, "en");
+  ok(!/maletas|traslado|Para cotizar/i.test(preg) && !/free/i.test(preg), `preguntar en inglés: el «me falta» en inglés, sin la frase de dinero del modelo («${preg}»)`);
+  const autoEn = textoSinImportesAjenos("Total 150", { respuestaModelo: "", accion: "cotizar", cotizacion: { cotizacionId: 1, numero: "00123", decision: "automatico", figuras: [70.8], total: "US$ 70.80", validez: "Nov 18, 2026", idioma: "en" } }, {}, ct, "es");
+  ok(autoEn.includes("00123") && autoEn.includes("US$ 70.80") && !/Le envío|cotización|válida/i.test(autoEn) && !autoEn.includes("150"), `la cotización en inglés manda sobre el turno en castellano («${autoEn}»)`);
+  const autoEs = textoSinImportesAjenos("Total 150", { respuestaModelo: "", accion: "cotizar", cotizacion: { cotizacionId: 1, numero: "00123", decision: "automatico", figuras: [283.2], total: "S/ 283.20", validez: "18/11/2026", idioma: "es" } }, {}, ct, "en");
+  ok(autoEs.startsWith("Le envío la cotización N° 00123"), "y la cotización en castellano manda sobre el turno en inglés");
 }
 console.log(fallos ? `\n${fallos} fallo(s)` : "\nTodo OK");
 process.exit(fallos ? 1 : 0);

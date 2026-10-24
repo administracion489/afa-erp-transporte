@@ -278,7 +278,13 @@ export type EstiloFecha =
   /** `VIE., 16 OCT. 2026` / `FRI, OCT 16, 2026` */
   | "cronograma"
   /** Formato por defecto del navegador para ese idioma (la fecha de emisión del documento). */
-  | "simple";
+  | "simple"
+  /**
+   * `25 oct. 2026` / `Oct 25, 2026`: la de los mensajes del chat. En inglés «10/25/2026» se lee
+   * como 10 de octubre… o como 25 de octubre, según de dónde sea quien lo lee: con el mes en letras
+   * no hay duda.
+   */
+  | "media";
 
 /**
  * Una fecha del documento. Una fecha SIN hora (`2026-10-16`) se ancla a medianoche LOCAL —como
@@ -291,6 +297,7 @@ export function fmtFechaDoc(valor: string | Date, idioma: Idioma, estilo: Estilo
     case "larga_mayus": return d.toLocaleDateString(loc, { day: "numeric", month: "long", year: "numeric" }).toUpperCase();
     case "corta": return d.toLocaleDateString(loc, { day: "2-digit", month: "2-digit", year: "numeric" });
     case "cronograma": return d.toLocaleDateString(loc, { weekday: "short", day: "numeric", month: "short", year: "numeric" }).toUpperCase();
+    case "media": return d.toLocaleDateString(loc, { day: "numeric", month: "short", year: "numeric" });
     default: return d.toLocaleDateString(loc);
   }
 }
@@ -377,8 +384,13 @@ export type ConsidPdf = Required<ConsidCot> & {
  */
 export const CONSID_VERSION = 2;
 
-/** Las consideraciones tal como se guardan en la fila. `plantilla`: el id de la que se copiaron. */
-export type ConsidFila = ConsidCot & { version?: number; plantilla?: string | null };
+/**
+ * Las consideraciones tal como se guardan en la fila. `plantilla`: el id de la que se copiaron.
+ * `idioma: "en"`: se copiaron de una plantilla EN INGLÉS (solo los traslados de la IA,
+ * lib/traslados/cotizacion-traslado.ts → `considDeTraslado`): ya están en inglés y se imprimen tal
+ * cual. Ausente = castellano (todo lo de antes).
+ */
+export type ConsidFila = ConsidCot & { version?: number; plantilla?: string | null; idioma?: "en" };
 
 /** ¿La fila trae sus condiciones FIJADAS (versión 2)? Solo un `version: 2` numérico. */
 export function esConsidFijada(c: unknown): boolean {
@@ -396,6 +408,9 @@ const listaDeFila = (x: unknown): string[] => (Array.isArray(x) ? (x as string[]
  * ES, fila de antes: EXACTAMENTE la regla de siempre — `cfg?.condiciones_x || consid.x` (una lista
  * vacía en la plantilla también gana, porque `[]` es verdadero).
  *
+ * EN, fila FIJADA y copiada de una plantilla EN INGLÉS (`consid.idioma === "en"`, solo los traslados
+ * de la IA): las listas de la FILA tal cual, sin traducir nada ni avisar — ya están en inglés.
+ *
  * EN (fijada o no, sin cambios): las de la plantilla NO se imprimen (son texto libre en español y
  * la plantilla no tiene versión inglesa); se usan las de la cotización, y la lista que es idéntica
  * a la de fábrica se cambia por su versión inglesa.
@@ -409,7 +424,7 @@ const listaDeFila = (x: unknown): string[] => (Array.isArray(x) ? (x as string[]
  * resumen abriría la política de la fila, que no es la impresa). No se avisa aparte en inglés: va en
  * el bloque de la política, que ya se avisa.
  */
-export function considParaPdf(cfg: CfgConsid, consid: ConsidCot & { version?: unknown }, idioma: Idioma): ConsidPdf {
+export function considParaPdf(cfg: CfgConsid, consid: ConsidCot & { version?: unknown; idioma?: unknown }, idioma: Idioma): ConsidPdf {
   if (normalizarIdioma(idioma) === "es") {
     if (esConsidFijada(consid)) {
       return { incluye: listaDeFila(consid.incluye), no_incluye: listaDeFila(consid.no_incluye), generales: listaDeFila(consid.generales), reserva: listaDeFila(consid.reserva), reserva_resumen: listaDeFila(consid.reserva_resumen), escritasTalCual: [] };
@@ -423,6 +438,9 @@ export function considParaPdf(cfg: CfgConsid, consid: ConsidCot & { version?: un
       reserva_resumen: cfg?.condiciones_reserva ? [] : listaDeFila(consid.reserva_resumen),
       escritasTalCual: [],
     };
+  }
+  if (esConsidFijada(consid) && consid.idioma === "en") {
+    return { incluye: listaDeFila(consid.incluye), no_incluye: listaDeFila(consid.no_incluye), generales: listaDeFila(consid.generales), reserva: listaDeFila(consid.reserva), reserva_resumen: listaDeFila(consid.reserva_resumen), escritasTalCual: [] };
   }
   const out: ConsidPdf = { incluye: [], no_incluye: [], generales: [], reserva: [], reserva_resumen: [], escritasTalCual: [] };
   for (const k of ["incluye", "no_incluye", "generales"] as const) {

@@ -12,18 +12,24 @@
 //     deriva; la pantalla lo pinta).
 // `sinDiseno`: las filas no traen la columna `diseno` (la misma migración sin correr): el diseño
 // sale del id (`disenoDe`), y duplicar no se ofrece.
+// `reglasTraslado` (idioma × moneda del traslado de la IA, cotizaciones-09) sigue la MISMA regla:
+// null SOLO si falta su tabla (la IA cotiza en castellano con las reglas viejas, como antes); otro
+// error → `ok: false`. Sin la tabla vieja tampoco puede existir la nueva: null.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { tablaFaltante } from "./columna-faltante";
-import { normalizarReglas, TABLA_PLANTILLAS, TABLA_REGLAS, type PlantillaFila, type ReglaPlantilla } from "./cotizacion-plantillas";
+import {
+  normalizarReglas, normalizarReglasTraslado, TABLA_PLANTILLAS, TABLA_REGLAS, TABLA_REGLAS_TRASLADO,
+  type PlantillaFila, type ReglaPlantilla, type ReglaTraslado,
+} from "./cotizacion-plantillas";
 
 // El cliente llega de varios sitios (servidor con service-role, navegador): se tipa lo mínimo.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Sb = any;
 
 export type LecturaPlantillas =
-  | { ok: true; plantillas: PlantillaFila[]; reglas: ReglaPlantilla[] | null; sinDiseno: boolean; error: null }
-  | { ok: false; plantillas: PlantillaFila[]; reglas: null; sinDiseno: boolean; error: string };
+  | { ok: true; plantillas: PlantillaFila[]; reglas: ReglaPlantilla[] | null; reglasTraslado: ReglaTraslado[] | null; sinDiseno: boolean; error: null }
+  | { ok: false; plantillas: PlantillaFila[]; reglas: null; reglasTraslado: null; sinDiseno: boolean; error: string };
 
 const PAGINA = 1000;
 /** Techo de sanidad (no operativo): una base con más plantillas que esto tiene otro problema. */
@@ -63,10 +69,10 @@ async function leerPlantillas(sb: Sb): Promise<{ filas: PlantillaFila[]; faltaTa
 export async function leerPlantillasYReglas(sb: Sb): Promise<LecturaPlantillas> {
   const pl = await leerPlantillas(sb);
   if (pl.error) {
-    return { ok: false, plantillas: [], reglas: null, sinDiseno: false, error: `No se pudieron leer las plantillas del PDF (${TABLA_PLANTILLAS}): ${pl.error}` };
+    return { ok: false, plantillas: [], reglas: null, reglasTraslado: null, sinDiseno: false, error: `No se pudieron leer las plantillas del PDF (${TABLA_PLANTILLAS}): ${pl.error}` };
   }
   // Sin la tabla de plantillas no puede haber reglas (las reglas la referencian).
-  if (pl.faltaTabla) return { ok: true, plantillas: [], reglas: null, sinDiseno: true, error: null };
+  if (pl.faltaTabla) return { ok: true, plantillas: [], reglas: null, reglasTraslado: null, sinDiseno: true, error: null };
   const sinDiseno = pl.filas.length > 0 && pl.filas.some(f => !Object.prototype.hasOwnProperty.call(f, "diseno"));
 
   let r: { data: unknown[] | null; error: { code?: string; message?: string } | null };
@@ -75,11 +81,25 @@ export async function leerPlantillasYReglas(sb: Sb): Promise<LecturaPlantillas> 
     r = await sb.from(TABLA_REGLAS).select("servicio, segmento, plantilla_id")
       .order("servicio", { ascending: true }).order("segmento", { ascending: true });
   } catch (e) {
-    return { ok: false, plantillas: pl.filas, reglas: null, sinDiseno, error: `No se pudieron leer las reglas de uso de las plantillas (${TABLA_REGLAS}): ${msg(e)}` };
+    return { ok: false, plantillas: pl.filas, reglas: null, reglasTraslado: null, sinDiseno, error: `No se pudieron leer las reglas de uso de las plantillas (${TABLA_REGLAS}): ${msg(e)}` };
   }
   if (r.error) {
-    if (tablaFaltante(r.error, TABLA_REGLAS)) return { ok: true, plantillas: pl.filas, reglas: null, sinDiseno, error: null };
-    return { ok: false, plantillas: pl.filas, reglas: null, sinDiseno, error: `No se pudieron leer las reglas de uso de las plantillas (${TABLA_REGLAS}): ${msg(r.error)}` };
+    if (tablaFaltante(r.error, TABLA_REGLAS)) return { ok: true, plantillas: pl.filas, reglas: null, reglasTraslado: null, sinDiseno, error: null };
+    return { ok: false, plantillas: pl.filas, reglas: null, reglasTraslado: null, sinDiseno, error: `No se pudieron leer las reglas de uso de las plantillas (${TABLA_REGLAS}): ${msg(r.error)}` };
   }
-  return { ok: true, plantillas: pl.filas, reglas: normalizarReglas(r.data), sinDiseno, error: null };
+  const reglas = normalizarReglas(r.data);
+
+  let t: { data: unknown[] | null; error: { code?: string; message?: string } | null };
+  try {
+    // Una celda por par (idioma, moneda): 4 como mucho.
+    t = await sb.from(TABLA_REGLAS_TRASLADO).select("idioma, moneda, plantilla_id")
+      .order("idioma", { ascending: true }).order("moneda", { ascending: true });
+  } catch (e) {
+    return { ok: false, plantillas: pl.filas, reglas: null, reglasTraslado: null, sinDiseno, error: `No se pudieron leer las reglas del traslado por idioma (${TABLA_REGLAS_TRASLADO}): ${msg(e)}` };
+  }
+  if (t.error) {
+    if (tablaFaltante(t.error, TABLA_REGLAS_TRASLADO)) return { ok: true, plantillas: pl.filas, reglas, reglasTraslado: null, sinDiseno, error: null };
+    return { ok: false, plantillas: pl.filas, reglas: null, reglasTraslado: null, sinDiseno, error: `No se pudieron leer las reglas del traslado por idioma (${TABLA_REGLAS_TRASLADO}): ${msg(t.error)}` };
+  }
+  return { ok: true, plantillas: pl.filas, reglas, reglasTraslado: normalizarReglasTraslado(t.data), sinDiseno, error: null };
 }

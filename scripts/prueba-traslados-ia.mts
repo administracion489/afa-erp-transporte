@@ -362,7 +362,8 @@ seccion("6. planEnvio: solo el aeropuerto sale solo, y solo con todo encendido")
   const sinCol = zonasBase as E.ZonaEnvio[];
   const r3 = M.evaluarTraslado(pedido(), { ...ctx, zonas: sinCol });
   ok(E.planEnvio({ resultado: r3, envioMaestro: true, zonas: sinCol, canal: "whatsapp", waId: "51966707225", modoAuto: true, perfilConfigurado: true, cuadra: true, pdfOk: true, palabras: [] }).decision === "revision", "sin la columna de zonas nada sale solo");
-  ok(Object.keys(E.MOTIVO_REVISION).length === 11 && Object.values(E.MOTIVO_REVISION).every((m) => m.texto && m.arreglo), "once motivos, cada uno con su arreglo");
+  // Revisión de seguridad (23-10-2026, hallazgo 5, DECLARADO): el decimotercero es `editada_a_mano`.
+  ok(Object.keys(E.MOTIVO_REVISION).length === 13 && Object.values(E.MOTIVO_REVISION).every((m) => m.texto && m.arreglo) && "editada_a_mano" in E.MOTIVO_REVISION, "trece motivos, cada uno con su arreglo (el último, editada_a_mano)");
 }
 
 // ── 7. Sin precio nunca se envía ─────────────────────────────────────────────
@@ -934,6 +935,11 @@ class ConsultaF implements PromiseLike<any> {
     return Promise.resolve().then(() => this.ejecutar()).then(ok, mal);
   }
   private ejecutar(): any {
+    // La regla del traslado por idioma × moneda (cotizaciones-09) NO existe salvo que la base de la
+    // prueba la siembre: es el estado de producción hasta que alguien corra el SQL (PGRST205).
+    if (this.tabla === "cotizacion_plantilla_reglas_traslado" && !Object.prototype.hasOwnProperty.call(this.sb.tablas, this.tabla)) {
+      return { data: null, count: null, error: { code: "PGRST205", message: `Could not find the table 'public.${this.tabla}' in the schema cache` } };
+    }
     const sb = this.sb, tabla = this.tabla, filas = sb.t(tabla);
     const falla = sb.fallas.find((x) => x.tabla === tabla && x.op === this.op);
     if (falla) return { data: null, count: null, error: { message: falla.mensaje } };
@@ -1031,6 +1037,7 @@ const simularFalso = (consultas: { n: number }) => async (_sb: unknown, e: Entra
   const resultado = M.evaluarTraslado({
     origen: punto(e.origen), destino: punto(e.destino), fecha_servicio: e.fecha_servicio, hora_servicio: e.hora_servicio, sentido: e.sentido,
     fecha_retorno: e.fecha_retorno, hora_retorno: e.hora_retorno, pax: e.pax, maletas: e.maletas, telefono: e.telefono, pide_dolares: e.pide_dolares,
+    idioma_cliente: e.idioma_cliente, pide_soles: e.pide_soles,
     paradas_intermedias: e.paradas_intermedias, fechas_adicionales: e.fechas_adicionales, vehiculos_pedidos: e.vehiculos_pedidos, senales: e.senales,
   }, { zonas, categorias, tarifas, tipoCambio: { fecha: hoy, venta: 3.431 }, hoy, igvPct: 18, validezDias: 30 });
   return { respuesta: { ok: true as const, resultado, lugares: {} as any }, catalogo: cat, igvPct: 18 };
@@ -1548,7 +1555,7 @@ seccion("21. accionAjena, la ruta de la tarjeta, /api/crm/ia/probar y el destino
   const iSnap = cuerpo.indexOf("const waDestinoInicial = waDestinoDe(contacto)"), iBucle = cuerpo.indexOf("for (let iter = 0");
   ok(iSnap > 0 && iSnap < iBucle, "crm-ia: el número de destino se copia antes del bucle del agente");
   ok(/enviarPorCanal\(sb, conv, contacto, textoFinal, waDestinoInicial\)/.test(cuerpo), "crm-ia: y se responde a ese número");
-  ok(/textoSinImportesAjenos\(textoFinal, ctx\.cotizacionTraslado, agente, contactoInicial\)/.test(cuerpo), "crm-ia: el saludo usa el nombre de antes del bucle");
+  ok(/textoSinImportesAjenos\(textoFinal, ctx\.cotizacionTraslado, agente, contactoInicial[,)]/.test(cuerpo), "crm-ia: el saludo usa el nombre de antes del bucle");
 }
 
 // ── 22. Auditoría 20-10: el «me falta» y la derivación que escribe el código no repiten texto con dinero ──
@@ -1743,9 +1750,11 @@ seccion("22. Las condiciones del traslado salen de la plantilla de su regla; sin
     const otroDiseno = { plantillas: [{ ...CORP, diseno: "moderno_fotos" }, ...T.plantillas.slice(1).map((p) => (p.id === "traslados_ia" ? { ...p, activa: false } : p))], reglas: T.reglas };
     const r12 = await plantillaParaTraslado(baseCon(otroDiseno), { moneda: "PEN", clienteId: null });
     ok(r12.ok && r12.plantilla === null && r12.codigo === "sin_plantilla", "regla desactivada y principal de otro diseño: null (Ajustes)");
-    // plantillaParaTraslado no recibe texto libre: sus únicas entradas son la moneda y el id del cliente.
+    // plantillaParaTraslado no recibe texto libre: sus únicas entradas son la moneda, el id del cliente
+    // y el idioma (un enum que derivó el código: «es» | «en»).
     const fuente = readFileSync("lib/traslados/plantilla-traslado-datos.ts", "utf8").replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-    ok(/plantillaParaTraslado\(sb: Sb, x: \{ moneda: unknown; clienteId: number \| null \}\)/.test(fuente) && !/req\b|cuerpo|input|json\(\)/.test(fuente), "plantillaParaTraslado solo recibe la moneda y el id del cliente (nunca el cuerpo de una petición)");
+    ok(/plantillaParaTraslado\(sb: Sb, x: \{ moneda: unknown; clienteId: number \| null; idioma\?: Idioma \}\)/.test(fuente) && !/req\b|cuerpo|input|json\(\)/.test(fuente)
+      && /idioma: x\.idioma === "en" \? "en" : "es"/.test(fuente), "plantillaParaTraslado solo recibe la moneda, el id del cliente y el idioma como enum (nunca el cuerpo de una petición)");
   }
 
   // De punta a punta: la cotización de la IA con y sin la migración.
@@ -1829,11 +1838,17 @@ seccion("22. Las condiciones del traslado salen de la plantilla de su regla; sin
     // El simulador usa la misma plantilla, sin cliente y sin tomar nada del cuerpo.
     const q = (x: string) => x.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
     const ruta = q(readFileSync("app/api/traslados/simular/route.ts", "utf8"));
-    ok(/plantillaParaTraslado\(sb, \{ moneda: r\.precio!\.moneda, clienteId: null \}\)/.test(ruta), "simulador: la plantilla con la moneda del motor y sin cliente");
+    // El idioma de la plantilla es el enum de la entrada que armó el servidor (la detección y el
+    // interruptor de la IA), no un texto del cuerpo.
+    ok(/plantillaParaTraslado\(sb, \{ moneda: r\.precio!\.moneda, clienteId: null, idioma: idiomaFila \}\)/.test(ruta)
+      && /const idiomaFila: Idioma = entrada\.idioma_cliente \? "en" : "es"/.test(ruta) && /const entrada = sim\.entrada/.test(ruta),
+      "simulador: la plantilla con la moneda del motor, sin cliente y con el idioma que decidió el código");
     ok(/if \(!pt\.ok\)[\s\S]{0,200}status: 500/.test(ruta) && ruta.indexOf("plantillaParaTraslado(") < ruta.indexOf("filaCotizacionTraslado("), "simulador: lectura fallida → 500 con su motivo, antes de armar la fila");
     ok(/plantilla: pt\.plantilla/.test(ruta) && /\.\.\.respuesta, envio, plantilla, condiciones/.test(ruta), "simulador: la fila con la plantilla, y la respuesta dice cuál");
     const ia = q(readFileSync("lib/traslados/cotizar-ia-datos.ts", "utf8"));
-    ok(/plantillaParaTraslado\(sb, \{ moneda: r\.precio!\.moneda, clienteId \}\)/.test(ia) && ia.indexOf("clienteIdDeRemitente(sb, ctx.contacto") < ia.indexOf("plantillaParaTraslado("), "IA: el tipo de cliente sale del cliente ya verificado (clienteIdDeRemitente)");
+    ok(/plantillaParaTraslado\(sb, \{ moneda: r\.precio!\.moneda, clienteId, idioma: idiomaFila \}\)/.test(ia) && ia.indexOf("clienteIdDeRemitente(sb, ctx.contacto") < ia.indexOf("plantillaParaTraslado("), "IA: el tipo de cliente sale del cliente ya verificado (clienteIdDeRemitente)");
+    ok(/const idiomaFila: Idioma = e\.idioma_cliente \? "en" : "es"/.test(ia) && /const v = validarEntrada\(entradaDelAgente\(/.test(ia) && /const e = v\.entrada/.test(ia),
+      "IA: el idioma de la plantilla sale de la entrada con lista blanca (entradaDelAgente), nunca del input del modelo");
   }
 }
 
@@ -2119,6 +2134,1196 @@ seccion("23. Cuentas y condiciones de la plantilla de traslados: inactiva, disti
     ok(confVacia.some((l) => l.includes("BCP") && l.includes("dólares")) && !confVacia.some((l) => l.includes("No son")), "al vaciar la celda (sin plantilla): las cuentas de corporativo");
     ok(PA.lineasConfirmTraslado({ resultante: null, plantillas: [CORP23], perfil: undefined, segmento: "particular" })[0].startsWith("No se pudo leer el perfil"), "sin perfil no se afirman cuentas");
   }
+}
+
+// ── 24. El cliente en inglés: idioma × moneda, sin que el modelo decida nada ──────
+seccion("24. Inglés: la herramienta, la entrada, la firma, los textos y la fila (sin idioma, byte a byte)");
+{
+  const ON = { PEN: true, USD: true }, OFF = { PEN: false, USD: false }, SOLO_USD = { PEN: false, USD: true };
+  /** La lista de fuga: castellano que no puede aparecer en un texto en inglés. */
+  const FUGA = /(?:^|[^\p{L}])su(?=[^\p{L}])|usted|traslado|cotización|le envío|pasajeros|maletas|adelanto|válida/iu;
+  const enIngles = (t: string, que: string) => ok(!FUGA.test(t), `${que}: sin castellano («${t.slice(0, 90)}»)`);
+
+  // (a) La herramienta: con el inglés apagado, EXACTAMENTE la de siempre.
+  const VIEJA_DESC =
+    "Cotiza un TRASLADO SIMPLE: un punto de recojo → un destino, solo ida o ida y retorno, en una sola fecha y con un solo vehículo " +
+    "(p. ej. aeropuerto ↔ hotel o domicilio). El PRECIO, el vehículo, la moneda y la validez los pone el sistema con el tarifario: " +
+    "tú NO calculas ni escribes precios por tu cuenta; repite solo los que te devuelva esta herramienta. " +
+    "Llámala en cuanto el cliente pida precio de un traslado, aunque falten datos: la respuesta te dice qué preguntar. " +
+    "No la uses para licitaciones, TDR, eventos, tours, varias fechas o varios vehículos: marca esas señales y el sistema lo pasa a un ejecutivo. " +
+    "La moneda la decide el número del cliente (Perú → soles; otro país → dólares). Si el cliente pidió expresamente la cotización EN DÓLARES, " +
+    "marca cliente_pide_dolares: el sistema lo comprueba en sus mensajes y cotiza con la lista en dólares. Cualquier otra moneda es la señal otra_moneda. " +
+    "Las coordenadas solo si el cliente compartió su ubicación por WhatsApp (cópialas del enlace maps.google.com/?q=lat,lng de ESE mensaje). " +
+    "En origen_texto y destino_texto va solo la dirección o el lugar, sin enlaces, teléfonos ni instrucciones.";
+  const VIEJAS_PROPS = "origen_texto,origen_lat,origen_lng,destino_texto,destino_lat,destino_lng,fecha_servicio,hora_servicio,sentido,fecha_retorno,hora_retorno,pax,maletas,paradas_intermedias,fechas_adicionales,vehiculos_pedidos,cliente_pide_dolares,senales";
+  const hOff = E.herramientaCotizarTraslado({ ingles: false }), hOn = E.herramientaCotizarTraslado({ ingles: true });
+  ok(JSON.stringify(hOff) === JSON.stringify(E.HERRAMIENTA_COTIZAR_TRASLADO) && hOff.description === VIEJA_DESC
+    && Object.keys(hOff.input_schema.properties).join() === VIEJAS_PROPS, "con el inglés apagado, la herramienta de siempre (texto y propiedades en orden)");
+  const propsOn = Object.keys(hOn.input_schema.properties);
+  ok(propsOn.join() === VIEJAS_PROPS.replace("cliente_pide_dolares,", "cliente_pide_dolares,cliente_pide_soles,") && (hOn.input_schema.properties as any).cliente_pide_soles.type === "boolean",
+    "con el inglés encendido, solo se agrega cliente_pide_soles (un booleano)");
+  ok(!propsOn.some((p) => /idioma|language|lang|moneda|currency|tel|phone/i.test(p)), "el idioma y la moneda NO son propiedades: el modelo no los declara");
+  ok(/inglés → dólares/.test(hOn.description) && /cliente_pide_soles/.test(hOn.description) && /otra_moneda/.test(hOn.description) && hOn.description.startsWith(VIEJA_DESC.slice(0, 200)),
+    "con el inglés, la frase de la moneda nueva (castellano/inglés/otro, soles y dólares a pedido)");
+
+  // (b) nombraSoles.
+  for (const t of ["en soles por favor", "price in soles", "Nuevos Soles", "PEN please", "S/ 150?", "S/150", "S/.", "in peruvian sol", "Peruvian soles", "local currency please", "en moneda local"]) ok(E.nombraSoles([t]), `«${t}» nombra los soles`);
+  for (const t of ["", "hace sol", "the sun", "Av. Larco s/n", "pencil", "dollars", "solo ida", "consola"]) ok(!E.nombraSoles([t]), `«${t}» no nombra los soles`);
+  ok(!E.nombraSoles(null) && !E.nombraSoles([null, 5] as unknown[]), "sin textos, no");
+
+  // (c) entradaDelAgente: sin idioma, byte a byte el algoritmo de antes (copiado literal); el input
+  //     del modelo nunca pone el idioma ni la moneda.
+  const entradaVieja = (input: unknown, remitente: { canal: string; waId: string | null }, textosUbicacion: string[], textosCliente: readonly unknown[] = []): unknown => {
+    const o = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+    const lugar = (texto: unknown, lat: unknown, lng: unknown) => {
+      const t = (typeof texto === "string" ? texto : "").trim();
+      const c = E.coordenadasVerificadas(lat, lng, textosUbicacion);
+      return c ? { lat: c.lat, lng: c.lng, texto: t || undefined } : t;
+    };
+    const wa = remitente?.canal === "whatsapp" && typeof remitente.waId === "string" && remitente.waId.trim() ? remitente.waId.trim() : null;
+    const pideDolares = o.cliente_pide_dolares === true && E.nombraDolares(textosCliente);
+    const senales = pideDolares && Array.isArray(o.senales) ? o.senales.filter((x) => x !== "otra_moneda") : o.senales;
+    return {
+      origen: lugar(o.origen_texto, o.origen_lat, o.origen_lng),
+      destino: lugar(o.destino_texto, o.destino_lat, o.destino_lng),
+      fecha_servicio: o.fecha_servicio, hora_servicio: o.hora_servicio,
+      sentido: o.sentido, fecha_retorno: o.fecha_retorno, hora_retorno: o.hora_retorno,
+      pax: o.pax, maletas: o.maletas,
+      paradas_intermedias: o.paradas_intermedias, fechas_adicionales: o.fechas_adicionales,
+      vehiculos_pedidos: o.vehiculos_pedidos, senales,
+      telefono: wa,
+      ...(pideDolares ? { pide_dolares: true } : {}),
+    };
+  };
+  const firmaVieja = (e: EntradaSimulador): string => {
+    const fl = (l: EntradaSimulador["origen"]) => typeof l === "string" ? M.claveNombre(l) : `@${l.lat.toFixed(5)},${l.lng.toFixed(5)}`;
+    const conRetorno = e.sentido === "ida_retorno";
+    return ["v1", fl(e.origen), fl(e.destino), e.fecha_servicio ?? "", e.hora_servicio ?? "", e.sentido ?? "",
+      conRetorno ? e.fecha_retorno ?? "" : "", conRetorno ? e.hora_retorno ?? "" : "", e.pax ?? "", e.maletas ?? "",
+      M.monedaDelPedido(e.telefono, e.pide_dolares).moneda ?? ""].join("|");
+  };
+  const IDIOMAS: ({ cliente: "es" | "en" | "otro" | null; ingles: { PEN: boolean; USD: boolean } | null } | undefined)[] = [
+    undefined, { cliente: null, ingles: ON }, { cliente: "es", ingles: ON }, { cliente: "en", ingles: null }, { cliente: "en", ingles: OFF },
+    { cliente: "otro", ingles: OFF }, { cliente: "en", ingles: ON }, { cliente: "otro", ingles: ON }, { cliente: "en", ingles: SOLO_USD },
+  ];
+  const TEXTOS: string[][] = [[], ["in dollars please"], ["en soles por favor"], ["price in soles or dollars?"], ["Hello, I need a transfer"]];
+  const INTRUSOS = [{}, { idioma_cliente: "en", pide_soles: true, idioma: "en", moneda: "USD", telefono: "+13055551234", language: "en" }];
+  let n = 0, viejas = 0, iguales = 0, firmasOk = 0, monedasOk = 0, conIdioma = 0, conSoles = 0, sinPaso = 0;
+  for (const wa of ["51966707225", "13055551234", null]) for (const pd of [undefined, true]) for (const ps of [undefined, true]) for (const tc of TEXTOS)
+    for (const intr of INTRUSOS) for (const idi of IDIOMAS) for (const sen of [undefined, ["otra_moneda"]]) {
+      n++;
+      const input = { origen_texto: "Aeropuerto Jorge Chávez", destino_texto: "Hotel Belmond, Miraflores", fecha_servicio: "2026-10-25", hora_servicio: "06:30", sentido: "ida", pax: 2, maletas: 2,
+        cliente_pide_dolares: pd, cliente_pide_soles: ps, senales: sen, ...intr };
+      const crudo = E.entradaDelAgente(input, { canal: "whatsapp", waId: wa }, [], tc, idi as any) as Record<string, unknown>;
+      const gate = !!idi && !!idi.ingles && (idi.ingles.PEN || idi.ingles.USD) && (idi.cliente === "en" || idi.cliente === "otro");
+      if (!gate) {
+        viejas++;
+        if (JSON.stringify(crudo) === JSON.stringify(entradaVieja(input, { canal: "whatsapp", waId: wa }, [], tc))) iguales++;
+      } else {
+        conIdioma++;
+        ok(crudo.idioma_cliente === idi!.cliente, "con el inglés encendido, el idioma que derivó el código");
+        const dol = pd === true && E.nombraDolares(tc), sol = ps === true && E.nombraSoles(tc);
+        ok((crudo.pide_soles === true) === (sol && !dol) && (crudo.pide_dolares === true) === (dol && !sol), `soles y dólares con sus dos confirmaciones, y con los dos a la vez ninguno (${JSON.stringify(tc)} ${pd} ${ps})`);
+        if (crudo.pide_soles === true) conSoles++;
+      }
+      // Invariante 3: lo que el modelo pone en el input no llega.
+      ok(crudo.telefono === (wa ?? null) && !("moneda" in crudo) && !("idioma" in crudo) && !("language" in crudo)
+        && (gate || (!("idioma_cliente" in crudo) && !("pide_soles" in crudo))), "el input del modelo no cambia ni el idioma ni la moneda");
+      // Invariante 2: la moneda de la firma es la del motor.
+      const v = validarEntrada(crudo);
+      if (!v.ok) { ok(false, "validable"); continue; }
+      const e = v.entrada;
+      const f = E.firmaPedido(e).split("|");
+      if (!e.idioma_cliente && E.firmaPedido(e) === firmaVieja(e)) firmasOk++;
+      if (e.idioma_cliente) ok(f[f.length - 1] === "en" && f.length === 12, "con idioma, «en» al final de la firma");
+      const r = M.evaluarTraslado({ origen: AEROP, destino: MIRA, fecha_servicio: e.fecha_servicio, hora_servicio: e.hora_servicio, sentido: e.sentido, pax: e.pax, maletas: e.maletas,
+        telefono: e.telefono, pide_dolares: e.pide_dolares === true, idioma_cliente: e.idioma_cliente ?? null, pide_soles: e.pide_soles === true, senales: e.senales }, ctx);
+      // Solo los pedidos que llegan al paso de la moneda (un pedido complejo se deriva antes).
+      if (r.moneda == null && r.codigo !== "sin_moneda") { sinPaso++; continue; }
+      if ((r.moneda ?? "") === f[10]) monedasOk++; else ok(false, `firma ${f[10]} vs motor ${r.moneda} (${JSON.stringify(e)})`);
+    }
+  ok(iguales === viejas, `sin el inglés encendido, entradaDelAgente es byte a byte la de antes (${iguales}/${viejas})`);
+  ok(firmasOk === viejas, `sin idioma, firmaPedido es byte a byte la de antes (${firmasOk}/${viejas})`);
+  ok(monedasOk === n - sinPaso && monedasOk > 0, `la moneda de la firma es la del motor en todo el barrido (${monedasOk}/${n - sinPaso}; ${sinPaso} derivados antes de la moneda)`);
+  ok(conIdioma > 0 && conSoles > 0, `corolario: el barrido sí produce idioma (${conIdioma}) y soles a pedido (${conSoles})`);
+  console.log(`  barrido: ${n} entradas`);
+  // Volver al castellano reusa la cotización de castellano (misma firma).
+  const b = validarEntrada(E.entradaDelAgente({ origen_texto: "Aeropuerto", destino_texto: "Miraflores", fecha_servicio: "2026-10-25", sentido: "ida", pax: 2, maletas: 0 }, { canal: "whatsapp", waId: "51966707225" }, [])) as any;
+  const bEn = validarEntrada(E.entradaDelAgente({ origen_texto: "Aeropuerto", destino_texto: "Miraflores", fecha_servicio: "2026-10-25", sentido: "ida", pax: 2, maletas: 0 }, { canal: "whatsapp", waId: "51966707225" }, [], [], { cliente: "en", ingles: ON })) as any;
+  ok(E.firmaPedido(bEn.entrada) !== E.firmaPedido(b.entrada) && E.firmaPedido(b.entrada) === firmaVieja(b.entrada), "el mismo pedido en inglés es otra cotización; en castellano, la de siempre");
+
+  // (d) faltaEnIdioma: la tabla exacta.
+  for (const f of Object.values(M.FALTA)) {
+    ok(E.faltaEnIdioma(f, "es") === f, `castellano tal cual («${f}»)`);
+    const en = E.faltaEnIdioma(f, "en");
+    ok(!!en && en !== f, `«${f}» tiene su inglés («${en}»)`);
+    enIngles(en ?? "", `falta «${f}»`);
+  }
+  for (const punto of ["recojo", "destino"] as const) {
+    const en = E.faltaEnIdioma(M.faltaDireccion(punto, "Hotel Belmond"), "en")!;
+    ok(en === `the exact address of the ${punto === "recojo" ? "pick-up point" : "destination"} (we could not find «Hotel Belmond»)`, `la dirección no encontrada, con su cita (${en})`);
+  }
+  ok(E.faltaEnIdioma("la hora de recojo", "en") === null && E.faltaEnIdioma("algo inventado", "es") === "algo inventado", "lo que no está en la tabla: null en inglés, tal cual en castellano");
+
+  // (e) Los textos del código en inglés: una sola versión, sin castellano.
+  const EN_TU: EstiloMensajes = { tratamiento: "tu", preguntas: "todo_junto", idioma: "en" };
+  const ESTILOS_EN: EstiloMensajes[] = ESTILOS.map((e) => ({ ...e, idioma: "en" }));
+  const L_EN = C.LINEA_DISPONIBILIDAD_EN;
+  ok(C.lineaDisponibilidad("en") === L_EN && C.lineaDisponibilidad("es") === C.LINEA_DISPONIBILIDAD, "la línea de disponibilidad en los dos idiomas");
+  const baseEn = { numero: "00123", total: "US$ 118.00", validez: "Nov 18, 2026" };
+  const LIT_EN = {
+    auto: `Here is quotation No. 00123 for your transfer. The total is US$ 118.00 (including IGV, Peruvian VAT), valid until Nov 18, 2026. ${L_EN}`,
+    ya: `I already sent you quotation No. 00123 for your transfer in this chat. The total is US$ 118.00 (including IGV, Peruvian VAT), valid until Nov 18, 2026. ${L_EN}`,
+    rev: "I've registered your transfer request with quotation No. 00123. One of our agents is reviewing it and will send it to you in this chat shortly.",
+  };
+  for (const e of ESTILOS_EN) {
+    const auto = E.mensajeCotizacionCodigo({ ...baseEn, decision: "automatico", estilo: e });
+    const ya = E.mensajeCotizacionCodigo({ ...baseEn, decision: "automatico", yaEnviada: true, estilo: e });
+    const rev = E.mensajeCotizacionCodigo({ ...baseEn, decision: "revision", estilo: e });
+    ok(auto === LIT_EN.auto && ya === LIT_EN.ya && rev === LIT_EN.rev, `${nombreEstilo(e)} en inglés: una sola versión, los tres literales (${auto} | ${ya} | ${rev})`);
+    for (const m of [auto, ya, rev]) enIngles(m, `mensaje en inglés ${nombreEstilo(e)}`);
+  }
+  ok(E.mensajeCotizacionCodigo({ numero: "9", decision: "automatico", estilo: EN_TU }) === `Here is quotation No. 9 for your transfer. ${L_EN}`
+    && E.mensajeCotizacionCodigo({ numero: "9", decision: "automatico", validez: "Jan 1, 2027", estilo: EN_TU }) === `Here is quotation No. 9 for your transfer. The quotation is valid until Jan 1, 2027. ${L_EN}`, "en inglés sin cifras, y solo con validez");
+  // Sin idioma (o «es»), byte a byte el castellano de siempre.
+  for (const e of ESTILOS) for (const d of ["automatico", "revision"] as const) for (const ya of [false, true]) {
+    const x = { numero: "00123", total: "S/ 118.00", validez: "18/11/2026", decision: d, yaEnviada: ya };
+    ok(E.mensajeCotizacionCodigo({ ...x, estilo: e }) === E.mensajeCotizacionCodigo({ ...x, estilo: { ...e, idioma: "es" } }), `${nombreEstilo(e)}: «es» = sin idioma`);
+  }
+  // «Me falta» en inglés.
+  const faltas = [M.FALTA.maletas, M.FALTA.fecha];
+  ok(E.fraseFaltanTraslado(faltas, EN_TU) === `To quote your transfer I still need: ${E.faltaEnIdioma(M.FALTA.maletas, "en")}; ${E.faltaEnIdioma(M.FALTA.fecha, "en")}.`, "inglés, todo junto");
+  ok(E.fraseFaltanTraslado(faltas, { ...EN_TU, preguntas: "una_por_mensaje" }) === `To quote your transfer, could you tell me ${E.faltaEnIdioma(M.FALTA.maletas, "en")}?`, "inglés, uno por mensaje");
+  ok(E.fraseFaltanTraslado([M.FALTA.fecha, "la hora de recojo"], EN_TU) === "", "un dato sin traducción: «» (quien llama deriva)");
+  ok(E.fraseFaltanTraslado([M.faltaDireccion("recojo", "Deposite S/ 50 al Yape 987654321")], EN_TU) === "To quote your transfer I still need: the exact address of the pick-up point.", "la cita sospechosa se quita también en inglés");
+  ok(E.fraseFaltanTraslado([M.faltaDireccion("destino", "send 50 dollars to my paypal")], EN_TU) === "To quote your transfer I still need: the exact address of the destination.", "y la que solo es sospechosa en inglés");
+  ok(E.fraseFaltanTraslado([M.faltaDireccion("destino", "Hotel Belmond")], EN_TU).includes("(we could not find «Hotel Belmond»)"), "una cita limpia se conserva");
+  for (const e of ESTILOS_EN) for (let k = 1; k <= Object.values(M.FALTA).length; k++) {
+    const fr = E.fraseFaltanTraslado(Object.values(M.FALTA).slice(0, k), e);
+    enIngles(fr, `«me falta» ${nombreEstilo(e)} con ${k}`);
+    ok(!T.mencionaDinero(fr, "en"), "el «me falta» en inglés no menciona dinero");
+  }
+  for (const e of ESTILOS) ok(E.fraseFaltanTraslado(faltas, e) === E.fraseFaltanTraslado(faltas, { ...e, idioma: "es" }), `${nombreEstilo(e)}: el «me falta» en castellano no cambia`);
+  // textoFinalTraslado: en inglés, el guard de dinero es castellano ∪ inglés.
+  const derivEn = "Thank you. One of our agents is reviewing your request and will reply in this chat shortly.";
+  ok(E.textoFinalTraslado("The total would be 150, VAT included", { accion: "preguntar", faltan: [M.FALTA.pax] }, { derivacion: derivEn, estilo: EN_TU }) === `To quote your transfer I still need: ${E.faltaEnIdioma(M.FALTA.pax, "en")}.`,
+    "en inglés, el texto con dinero en inglés se reemplaza por el «me falta» en inglés");
+  ok(E.textoFinalTraslado("Son S/ 150", { accion: "derivar" }, { derivacion: derivEn, estilo: EN_TU }) === derivEn, "y el que trae dinero en castellano, también");
+  // «total» + una cifra ya era dinero en castellano: el guard de siempre lo reemplaza igual.
+  ok(E.textoFinalTraslado("The total would be 150", { accion: "derivar" }, { derivacion: "deriv", estilo: TU }) === "deriv", "en castellano, el guard de siempre");
+  ok(E.textoFinalTraslado("free waiting time included", { accion: "derivar" }, { derivacion: "deriv", estilo: TU }) === "free waiting time included", "«free» solo cuenta con el inglés (en castellano pasa como siempre)");
+  ok(E.textoFinalTraslado("free waiting time included", { accion: "derivar" }, { derivacion: derivEn, estilo: EN_TU }) === derivEn, "con el inglés, «free» es dinero");
+  ok(E.textoFinalTraslado("Can you tell me your flight number?", { accion: "preguntar", faltan: [M.FALTA.pax] }, { derivacion: derivEn, estilo: EN_TU }) === "Can you tell me your flight number?", "un texto limpio del modelo pasa intacto");
+  const cotEn = { numero: "00123", decision: "automatico" as const, total: "US$ 118.00", validez: "Nov 18, 2026" };
+  ok(E.textoFinalTraslado("anything", { accion: "cotizar", cotizacion: cotEn }, { derivacion: derivEn, estilo: EN_TU }) === LIT_EN.auto, "con cotización, el texto del código en inglés");
+
+  // (f) Invariante 6: mencionaDinero(x, "en") ⊇ mencionaDinero(x, "es").
+  const SI_EN = ["the total would be 150", "around one hundred fifty dollars", "150 USD", "$150", "free waiting time", "20% off", "VAT included", "20 bucks", "it costs 80", "fee of 30", "20 percent discount", "price per leg is 45"];
+  const NO_EN = ["2 people, 3 bags at 3 pm", "flight LA2045 at 14:30", "October 25", "feel free to ask", "drop off at the hotel", "about 2 hours", "around October 25", "we are 4 passengers", "pick up at 10:30 am", "the airport transfer", "Hello, I need a transfer from the airport tomorrow", "one way please"];
+  for (const t of SI_EN) ok(T.mencionaDinero(t, "en"), `en inglés, «${t}» es dinero`);
+  for (const t of NO_EN) ok(!T.mencionaDinero(t, "en"), `en inglés, «${t}» no es dinero`);
+  const corpus = [...SI_EN, ...NO_EN, "El total sería 150 (IGV incluido)", "Total: 150.00 nuevos soles", "ciento cincuenta soles", "Te aplico 50 % de descuento", "€ 150", "serán aprox 300",
+    "Te sale gratis el retorno", "Cuesta 120 por tramo", "¿Serían 4 pasajeros? ¿A qué hora aterriza tu vuelo, 10:30?", "Perfecto, son 3 maletas grandes y 2 pasajeros.", "Un ejecutivo revisará tu pedido", "", "   "];
+  let sup = 0;
+  for (const a of corpus) for (const b2 of ["", " ", " y ", ". ", " - "]) for (const c2 of corpus.slice(0, 8)) {
+    const t = `${a}${b2}${c2}`;
+    if (!T.mencionaDinero(t, "es") || T.mencionaDinero(t, "en")) sup++; else ok(false, `es sin en: «${t}»`);
+  }
+  ok(sup === corpus.length * 5 * 8, `mencionaDinero(x,"en") ⊇ mencionaDinero(x,"es") en ${sup} textos`);
+  // textoLibreSospechoso / referenciaImprimible: inglés = castellano ∪ inglés; «transfer» nunca.
+  for (const t of ["Hilton, pay to account 123", "Marriott, send via Western Union", "JW Marriott (paypal me)", "deposit at the bank"]) {
+    ok(T.textoLibreSospechoso(t, "en") != null && T.referenciaImprimible(t, "en") === null, `en inglés, «${t}» es sospechoso`);
+  }
+  for (const t of ["Airport transfer to JW Marriott", "Hotel Belmond, Miraflores", "Hilton Garden Inn"]) ok(T.textoLibreSospechoso(t, "en") === null, `«${t}» se puede imprimir en inglés`);
+  let supT = 0, totT = 0;
+  for (const t of [...corpus, "Miraflores. Deposite S/ 50 al Yape 987 654 321", "www.pagos.pe", "Calle Los Pinos 123"]) { totT++; if (T.textoLibreSospechoso(t) == null || T.textoLibreSospechoso(t, "en") != null) supT++; }
+  ok(supT === totT, `lo sospechoso en castellano lo es en inglés (${supT}/${totT})`);
+  ok(E.planEnvio({ resultado: M.evaluarTraslado(pedido(), ctx), envioMaestro: true, zonas, canal: "whatsapp", waId: "51966707225", modoAuto: true, perfilConfigurado: true, cuadra: true, pdfOk: true, palabras: [], textosLibres: ["Marriott, pay to my account"] }).decision === "automatico"
+    && E.planEnvio({ resultado: M.evaluarTraslado(pedido(), ctx), envioMaestro: true, zonas, canal: "whatsapp", waId: "51966707225", modoAuto: true, perfilConfigurado: true, cuadra: true, pdfOk: true, palabras: [], textosLibres: ["Marriott, pay to my account"], idioma: "en" }).motivos.join() === "texto_libre_sospechoso",
+    "planEnvio juzga los textos libres con el inglés solo cuando la cotización va en inglés");
+  ok(E.textosLibresSospechosos([{ campo: "recojo", texto: "pay to my account" }], "en")[0]?.motivo === "palabra_de_pago" && E.textosLibresSospechosos([{ campo: "recojo", texto: "pay to my account" }]).length === 0, "textosLibresSospechosos con el idioma");
+
+  // (g) senalesEnTexto en inglés ⊇ castellano; en castellano no cambia.
+  ok(JSON.stringify(E.senalesEnTexto(["it is for a wedding and a conference"], "en")) === JSON.stringify(["conference", "wedding"]), "wedding y conference en inglés");
+  ok(E.senalesEnTexto(["we have an RFP and the terms of reference"], "en").includes("RFP") && E.senalesEnTexto(["we have an RFP and the terms of reference"], "en").includes("terms of reference"), "RFP y terms of reference");
+  ok(E.senalesEnTexto(["any discount for a contract? it's a tender"], "en").length === 3 && E.senalesEnTexto(["a city tour or full day"], "en").length === 2, "discount, contract, tender; city tour y full day");
+  ok(E.senalesEnTexto(["it is for a wedding"]).length === 0 && E.senalesEnTexto(["Adjunto los TDR"], "en").join() === "TDR", "en castellano el inglés no cuenta; en inglés el castellano sí");
+  for (const t of ["Adjunto los TDR", "para un evento", "", "event", "wedding"]) {
+    const es = E.senalesEnTexto([t]), en = E.senalesEnTexto([t], "en");
+    ok(es.every((x) => en.includes(x)), `en ⊇ es («${t}»)`);
+  }
+
+  // (h) revisionPorCondiciones: la cotización en inglés con condiciones en castellano queda en revisión.
+  const cEs = { incluye: [], no_incluye: [], generales: ["x"] }, cEn = { ...cEs, version: 2, idioma: "en" };
+  ok(JSON.stringify(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: cEs })) === JSON.stringify(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: cEs, idiomaPdf: "es" })), "sin idiomaPdf (o «es»), lo de siempre");
+  ok(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: cEs, idiomaPdf: "en" }).motivos.join() === "condiciones_en_otro_idioma", "en inglés con condiciones en castellano → condiciones_en_otro_idioma");
+  ok(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: cEn, idiomaPdf: "en" }).motivos.length === 0, "en inglés con condiciones en inglés, nada");
+  ok(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: cEn, idiomaPdf: "es" }).motivos.length === 0, "en castellano, el idioma de las condiciones no se mira");
+  ok(E.MOTIVO_REVISION.condiciones_en_otro_idioma.texto === "La cotización va en inglés pero sus condiciones salieron de una plantilla en castellano."
+    && E.MOTIVO_REVISION.condiciones_en_otro_idioma.arreglo.includes("Traslado de la IA · inglés · soles") && E.MOTIVO_REVISION.condiciones_en_otro_idioma.arreglo.includes("/cotizaciones/plantillas"), "el motivo nuevo con su texto y su arreglo");
+
+  // (i) estadoCotizadorIA con el inglés: sin la clave, las líneas de siempre; parcial → ámbar.
+  const AMBAR = new Set(["sin_migracion", "agente_no_autonomo", "envio_sin_zonas"]);
+  const agenteOk = { activo: true, canales: ["whatsapp"], canales_autonomos: ["whatsapp"] };
+  let ne = 0;
+  for (const sinMigracion of [false, true]) for (const iaCotiza of [false, true]) for (const envioMaestro of [false, true]) for (const zs of [[], ["Aeropuerto Jorge Chávez"]])
+    for (const agente of [null, agenteOk, { ...agenteOk, canales_autonomos: [] }]) for (const ingles of [null, OFF, ON, SOLO_USD, { PEN: true, USD: false }]) {
+      ne++;
+      const base0 = { iaCotiza, envioMaestro, zonasConEnvio: zs, agente, sinMigracion };
+      const e0 = E.estadoCotizadorIA(base0), e1 = E.estadoCotizadorIA({ ...base0, ingles });
+      ok(e1.codigo === e0.codigo, "el inglés no cambia el código");
+      const parcial = !!ingles && ingles.PEN !== ingles.USD;
+      const llega = !sinMigracion && iaCotiza && !!agente;
+      ok(e1.ambar === (AMBAR.has(e1.codigo) || (llega && parcial)), `ámbar ⟺ los de siempre o el inglés parcial (${e1.codigo}, ${JSON.stringify(ingles)})`);
+      ok(llega ? e1.lineas.length === e0.lineas.length + 1 && JSON.stringify(e1.lineas.slice(0, -1)) === JSON.stringify(e0.lineas) : JSON.stringify(e1) === JSON.stringify(e0), "una línea más, al final, solo si la IA cotiza");
+    }
+  ok(E.estadoCotizadorIA({ iaCotiza: true, envioMaestro: true, zonasConEnvio: ["A"], agente: agenteOk, sinMigracion: false, ingles: null }).lineas.at(-1)!.includes("cotizaciones-09"), "sin la tabla nueva, nombra el SQL");
+  ok(E.estadoCotizadorIA({ iaCotiza: true, envioMaestro: true, zonasConEnvio: ["A"], agente: agenteOk, sinMigracion: false, ingles: SOLO_USD }).lineas.at(-1)!.includes("Traslado de la IA · inglés · soles"), "parcial: nombra la celda que falta");
+  console.log(`  barrido estadoCotizadorIA: ${ne}`);
+
+  // (j) La fila y su PDF: sin idioma, byte a byte; en inglés, los textos del código en inglés.
+  const p0 = pedido({ sentido: "ida_retorno", fecha_retorno: "2026-10-28", pax: 3, maletas: 2 });
+  const r0 = M.evaluarTraslado(p0, ctx);
+  const e0 = entradaDe(p0);
+  const x0 = { convId: "c", clienteId: null, atencion: "Ana", config, firma: "f", hoy: HOY };
+  const fEs = C.filaCotizacionTraslado(r0, e0, x0);
+  ok(JSON.stringify(fEs) === JSON.stringify(C.filaCotizacionTraslado(r0, e0, { ...x0, idioma: "es" })) && fEs.idioma_pdf === "es" && !("idioma_cliente" in fEs.traslado_json)
+    && fEs.items_json[0].descripcion.startsWith("TRASLADO IDA Y RETORNO · ") && fEs.items_json[0].descripcion.endsWith("pasajeros) · precio por tramo"), "sin idioma, la fila de siempre");
+  const eEn = { ...e0, idioma_cliente: "en" as const };
+  const fEn = C.filaCotizacionTraslado(r0, eEn, { ...x0, idioma: "en" });
+  ok(fEn.idioma_pdf === "en" && fEn.traslado_json.idioma_cliente === "en" && fEn.items_json[0].descripcion === `TRANSFER ROUND TRIP · ${fEn.origen} – ${fEn.destino} · ${r0.vehiculo!.categoria!.nombre} (up to ${r0.vehiculo!.categoria!.capacidad} passengers) · price per leg`,
+    `en inglés, la descripción del ítem (${fEn.items_json[0].descripcion})`);
+  enIngles(fEn.items_json[0].descripcion, "descripción del ítem");
+  ok(JSON.stringify({ ...fEn, idioma_pdf: "es", items_json: fEs.items_json, traslado_json: fEs.traslado_json }) === JSON.stringify(fEs), "lo demás de la fila no cambia con el idioma (importes, moneda, condiciones, cliente)");
+  const fIda = C.filaCotizacionTraslado(M.evaluarTraslado(pedido(), ctx), entradaDe(pedido()), { ...x0, idioma: "en" });
+  ok(fIda.items_json[0].descripcion.startsWith("TRANSFER ONE WAY · "), "solo ida → ONE WAY");
+  const rPin = M.evaluarTraslado(pedido(), ctx);
+  const ePin = { ...entradaDe(pedido()), destino: { lat: -12.131, lng: -77.03 } };
+  ok(C.filaCotizacionTraslado(rPin, ePin, { ...x0, idioma: "en" }).destino === "Miraflores (shared location)" && C.filaCotizacionTraslado(rPin, ePin, x0).destino === "Miraflores (ubicación compartida)", "«(shared location)» / «(ubicación compartida)»");
+  ok(C.filaCotizacionTraslado(rPin, { ...entradaDe(pedido()), destino: "Marriott, pay to my account" }, { ...x0, idioma: "en" }).destino === "Miraflores"
+    && C.filaCotizacionTraslado(rPin, { ...entradaDe(pedido()), destino: "Marriott, pay to my account" }, x0).destino === "Miraflores (Marriott, pay to my account)", "la referencia se juzga con los guards del idioma de la fila");
+  // considDeTraslado: «en» solo si la plantilla es inglesa.
+  const plEs = { id: "pl_es", nombre: "Traslados", diseno: "corporativo", condiciones_generales: ["Espera de 30 min."], condiciones_incluye: [], condiciones_no_incluye: [] } as any;
+  const plEn = { ...plEs, id: "pl_en", idioma: "en", condiciones_generales: ["30 minutes of free waiting time."] };
+  ok(!("idioma" in C.considDeTraslado(plEs, config, "PEN")) && C.considDeTraslado(plEn, config, "PEN").idioma === "en" && !("idioma" in C.considDeTraslado(null, config, "PEN")), "considDeTraslado: «en» solo con una plantilla en inglés");
+  // cifrasDeFila, caption y archivo en el idioma de la fila.
+  const leidaEn = { ...fEn, id: 5 }, leidaEs = { ...fEs, id: 5 };
+  const ce = C.cifrasDeFila(leidaEn)!, cs = C.cifrasDeFila(leidaEs)!;
+  ok(cs.total.startsWith("S/ ") && /^\d{2}\/\d{2}\/\d{4}$/.test(cs.validez!) && JSON.stringify(cs) === JSON.stringify(C.cifrasDeFila({ ...leidaEs, idioma_pdf: undefined } as any)), `en castellano, las cifras de siempre (${cs.total} · ${cs.validez})`);
+  ok(JSON.stringify(ce.figuras) === JSON.stringify(cs.figuras) && /^[A-Z][a-z]{2} \d{1,2}, \d{4}$/.test(ce.validez!) && ce.total.replace(/[^\d.]/g, "") === cs.total.replace(/[^\d.]/g, ""), `en inglés, las MISMAS figuras y la validez con el mes en letras (${ce.total} · ${ce.validez})`);
+  ok(C.nombreArchivoPdf("00123", "en") === "Quotation-00123.pdf" && C.nombreArchivoPdf("00123") === "Cotizacion-00123.pdf" && C.nombreArchivoPdf("", "en") === "Quotation-transfer.pdf", "el nombre del archivo en el idioma");
+  const emp = empresaConDefectos({ nombre: "Empresa de Prueba SAC" } as any);
+  ok(C.captionDocumento({ id: 5, numero_cotizacion: "00123", origen: "a", destino: "b", idioma_pdf: "en" }, emp).startsWith("Quotation No. 00123 · a → b")
+    && C.captionDocumento({ id: 5, numero_cotizacion: "00123", origen: "a", destino: "b" }, emp).startsWith("Cotización N° 00123 · a → b"), "el caption en el idioma de la fila");
+  // La descripción de la unidad: en inglés, nunca la de castellano.
+  const catX = { nombre: "Minivan H1 10 pax", capacidad: 10, maletas_bodega: 4, descripcion_cliente: "- Aire acondicionado\n- Asientos reclinables", descripcion_cliente_en: null as string | null };
+  ok(C.descripcionCategoria(catX, "en") === "Minivan H1 for up to 10 passengers · luggage hold for 4 large (23 kg) suitcases" && C.descripcionCategoria(catX) === "- Aire acondicionado\n- Asientos reclinables", "sin descripción en inglés: la frase del sistema en inglés, nunca la de castellano");
+  ok(C.descripcionCategoria({ ...catX, descripcion_cliente_en: " - Air conditioning \n\n - Reclining seats " }, "en") === "- Air conditioning\n- Reclining seats", "con descripción en inglés, la escrita, limpia");
+  ok(C.descripcionCategoria({ nombre: "Auto", capacidad: 1, maletas_bodega: 1, descripcion_cliente: null }, "en") === "Auto for up to 1 passenger · luggage hold for 1 large (23 kg) suitcase", "singulares en inglés");
+  enIngles(C.descripcionCategoria(catX, "en"), "descripción de la unidad");
+  ok(C.vehiculoDeCategoria({ clave: "H1", ...catX }, { idioma: "en" })!.descripcion_unidad === C.descripcionCategoria(catX, "en") && C.vehiculoDeCategoria({ clave: "H1", ...catX })!.descripcion_unidad === C.descripcionCategoria(catX), "vehiculoDeCategoria con el idioma");
+  // La entrada del PDF.
+  const pdfEs = C.entradaCorporativaTraslado(leidaEs, { empresa: null, ahoraMs: Date.parse("2026-10-19T15:00:00Z") });
+  ok(JSON.stringify(pdfEs) === JSON.stringify(C.entradaCorporativaTraslado({ ...leidaEs, idioma_pdf: undefined } as any, { empresa: null, ahoraMs: Date.parse("2026-10-19T15:00:00Z") }))
+    && pdfEs.idioma === "es" && pdfEs.cot.idioma_pdf === "es" && pdfEs.notaTotales === C.LINEA_DISPONIBILIDAD && !("itemsEnIdioma" in pdfEs) && !("version" in (pdfEs.consid as object)), "en castellano, la entrada de siempre");
+  const pdfEn = C.entradaCorporativaTraslado(leidaEn, { empresa: null, ahoraMs: Date.parse("2026-10-19T15:00:00Z") });
+  ok(pdfEn.idioma === "en" && pdfEn.cot.idioma_pdf === "en" && pdfEn.notaTotales === L_EN && pdfEn.itemsEnIdioma === true && !("version" in (pdfEn.consid as object)), "en inglés: idioma, la línea en inglés, los ítems ya en inglés; condiciones de Ajustes sin marca");
+  const leidaEnCond = { ...leidaEn, consideraciones_json: C.considDeTraslado(plEn, config, "PEN") };
+  const pdfEnCond = C.entradaCorporativaTraslado(leidaEnCond, { empresa: null, ahoraMs: Date.parse("2026-10-19T15:00:00Z") });
+  ok((pdfEnCond.consid as any).version === 2 && (pdfEnCond.consid as any).idioma === "en", "con las condiciones de una plantilla en inglés, van marcadas (se imprimen tal cual)");
+  ok(C.entradaCorporativaTraslado({ ...leidaEn, items_json: [{ dias: 1, cantidad: 1, precio_unit: 100, descuento_pct: 0 }] }, { empresa: null }).items[0].descripcion === "Transfer", "el ítem sin descripción cae a «Transfer»");
+  // respuestaParaModelo: el total y la validez como los verá el cliente.
+  const rCot = M.evaluarTraslado(pedido({ telefono: "+13055551234" }), ctx);
+  const resEs = JSON.parse(E.respuestaParaModelo({ resultado: rCot, cotizacion: { numero: "1", decision: "automatico" } }));
+  const resEn = JSON.parse(E.respuestaParaModelo({ resultado: rCot, cotizacion: { numero: "1", decision: "automatico" }, idioma: "en" }));
+  ok(E.respuestaParaModelo({ resultado: rCot, cotizacion: { numero: "1", decision: "automatico" } }) === E.respuestaParaModelo({ resultado: rCot, cotizacion: { numero: "1", decision: "automatico" }, idioma: "es" }), "respuestaParaModelo: «es» = sin idioma");
+  ok(/^\d{2}\/\d{2}\/\d{4}$/.test(resEs.cotizacion.validez) && /^[A-Z][a-z]{2} \d{1,2}, \d{4}$/.test(resEn.cotizacion.validez) && resEn.instruccion.includes(L_EN.charAt(0).toLowerCase() + L_EN.slice(1)), `respuestaParaModelo en inglés (${resEn.cotizacion.total} · ${resEn.cotizacion.validez})`);
+}
+
+// ── 25. El cableado del inglés: la plantilla de la celda, el interruptor y la cotización de punta a punta ──
+// Lo que la sección 24 fija sobre los motores puros, aquí sobre la base falsa: (a) plantillaParaTraslado
+// con la tabla de cotizaciones-09 elige por idioma × moneda y no lee al cliente; sin la tabla, la regla
+// vieja; (b) leerInglesTraslado; (c) un cliente que escribe en inglés desde un +51 recibe la cotización
+// en INGLÉS y en DÓLARES (fila, condiciones, PDF, nombre del archivo, caption, tarjeta); (d) con el
+// inglés encendido, un cliente en castellano recibe EXACTAMENTE la fila de antes; (e) el inglés solo
+// en dólares + «en soles» → soles y revisión por condiciones en castellano; (f) sin la columna
+// idioma_pdf una cotización en inglés no se guarda a medias; (g) el idioma lo decide el código.
+seccion("25. Inglés de punta a punta: plantilla por idioma × moneda, interruptor y cotización en inglés");
+{
+  const { plantillaParaTraslado, leerInglesTraslado } = await import("../lib/traslados/plantilla-traslado-datos");
+  type Plantilla = import("../lib/cotizacion-plantillas").PlantillaFila;
+  type Regla = import("../lib/cotizacion-plantillas").ReglaPlantilla;
+  type ReglaT = import("../lib/cotizacion-plantillas").ReglaTraslado;
+  class SbLog extends SbFalso {
+    lecturas: string[] = [];
+    from(tabla: string): any { this.lecturas.push(tabla); return super.from(tabla); }
+  }
+  const CORP: Plantilla = {
+    id: "corporativo", nombre: "Corporativo", es_principal: true, activa: true, diseno: "corporativo", idioma: "es", orden: 1,
+    condiciones_generales: ["GENERAL DE LA CORPORATIVA"], condiciones_incluye: ["INCLUYE DE LA CORPORATIVA"], condiciones_no_incluye: ["NO INCLUYE DE LA CORPORATIVA"],
+    mostrar_cuentas_bancarias: true, usar_bancos_propios: true, banco_1_nombre: "BCP", banco_1_cuenta: "191-1234567-0-12", banco_1_cci: "002-191-001234567012-55",
+  };
+  const TIA: Plantilla = { ...CORP, id: "traslados_ia", nombre: "Traslados (IA)", es_principal: false, orden: 2, condiciones_generales: ["CONDICIÓN DEL TRASLADO"], condiciones_incluye: ["Conductor profesional"], condiciones_no_incluye: ["Parqueo del aeropuerto"] };
+  const EN: Plantilla = {
+    ...CORP, id: "traslados_ia_en", nombre: "Transfers (AI) · English", es_principal: false, idioma: "en", orden: 3,
+    condiciones_generales: ["ENGLISH GENERAL TERM"], condiciones_incluye: ["Professional driver"], condiciones_no_incluye: ["Airport parking"],
+  };
+  const REGLAS: Regla[] = [
+    { servicio: "traslado_ia", segmento: "empresa", plantilla_id: "traslados_ia" },
+    { servicio: "traslado_ia", segmento: "particular", plantilla_id: "traslados_ia" },
+    { servicio: "traslado_ia", segmento: "extranjero", plantilla_id: "traslados_ia" },
+  ];
+  const CELDAS_ES: ReglaT[] = [{ idioma: "es", moneda: "PEN", plantilla_id: "traslados_ia" }, { idioma: "es", moneda: "USD", plantilla_id: "traslados_ia" }];
+  const CELDAS_ON: ReglaT[] = [...CELDAS_ES, { idioma: "en", moneda: "PEN", plantilla_id: "traslados_ia_en" }, { idioma: "en", moneda: "USD", plantilla_id: "traslados_ia_en" }];
+  const CELDAS_SOLO_USD: ReglaT[] = [...CELDAS_ES, { idioma: "en", moneda: "USD", plantilla_id: "traslados_ia_en" }];
+  const INGLES = [
+    "Hi, I need a transfer from the airport to my hotel in Miraflores, please",
+    "We are two people with one suitcase and we arrive on the morning flight",
+    "Could you send me the price? Thank you very much",
+  ];
+  /** La base de la sección 17 con plantillas, reglas viejas y (si se pide) la tabla de cotizaciones-09. */
+  const base = (x: { celdas?: ReglaT[] | null; mensajes?: string[]; plantillas?: Plantilla[] } = {}) => {
+    const sb = new SbLog(() => reloj);
+    Object.assign(sb.tablas, nuevaBase().tablas);
+    sb.tablas.cotizacion_plantillas = (x.plantillas ?? [CORP, TIA, EN]).map((p) => ({ ...p }));
+    sb.tablas.cotizacion_plantilla_reglas = REGLAS.map((r) => ({ ...r }));
+    if (x.celdas !== null && x.celdas !== undefined) sb.tablas.cotizacion_plantilla_reglas_traslado = x.celdas.map((r) => ({ ...r }));
+    if (x.mensajes) {
+      sb.tablas.crm_mensajes = x.mensajes.map((c, i) => ({ id: `mi${i}`, conversacion_id: "cv-1", direccion: "entrante", tipo: "texto", contenido: c, created_at: new Date(reloj - (x.mensajes!.length - i) * 60_000).toISOString() }));
+    }
+    sb.tablas.traslado_categorias = sb.tablas.traslado_categorias.map((c) => ({ ...c, descripcion_cliente_en: "ENGLISH UNIT DESCRIPTION" }));
+    return sb;
+  };
+  const clientesLeidos = (sb: SbLog) => sb.lecturas.filter((t) => t === "clientes").length;
+
+  // (a) plantillaParaTraslado con la regla idioma × moneda.
+  {
+    const sb1 = base({ celdas: CELDAS_ON });
+    const r1 = await plantillaParaTraslado(sb1, { moneda: "PEN", clienteId: 7 });
+    ok(r1.ok && r1.codigo === "regla" && r1.plantilla?.id === "traslados_ia" && r1.celda?.idioma === "es" && r1.celda?.moneda === "PEN" && r1.idiomaCondiciones === "es",
+      `castellano/soles: la celda (${r1.ok ? `${r1.codigo} ${r1.plantilla?.id}` : r1.detalle})`);
+    ok(r1.ok && JSON.stringify(r1.ingles) === JSON.stringify({ PEN: true, USD: true }), "y dice en qué monedas está encendido el inglés");
+    ok(clientesLeidos(sb1) === 0, "con la regla idioma × moneda el tipo del cliente no decide: no se lee");
+    const r2 = await plantillaParaTraslado(base({ celdas: CELDAS_ON }), { moneda: "USD", clienteId: null, idioma: "en" });
+    ok(r2.ok && r2.codigo === "regla" && r2.plantilla?.id === "traslados_ia_en" && r2.celda?.idioma === "en" && r2.celda?.moneda === "USD" && r2.idiomaCondiciones === "en",
+      `inglés/dólares: la plantilla en inglés (${r2.ok ? `${r2.codigo} ${r2.plantilla?.id}` : r2.detalle})`);
+    const r3 = await plantillaParaTraslado(base({ celdas: CELDAS_SOLO_USD }), { moneda: "PEN", clienteId: null, idioma: "en" });
+    ok(r3.ok && r3.codigo === "sin_plantilla_idioma" && r3.plantilla?.id === "traslados_ia" && r3.idiomaCondiciones === "es",
+      `inglés/soles sin plantilla inglesa: la de castellano, dicho (${r3.ok ? `${r3.codigo} ${r3.plantilla?.id}` : r3.detalle})`);
+    const r4 = await plantillaParaTraslado(base({ celdas: null }), { moneda: "PEN", clienteId: null, idioma: "en" });
+    ok(r4.ok && r4.celda === null && r4.ingles === null && r4.plantilla?.id === "traslados_ia" && r4.codigo === "regla",
+      `sin cotizaciones-09: la regla vieja por segmento y sin inglés (${r4.ok ? `${r4.codigo} ${r4.plantilla?.id}` : r4.detalle})`);
+    const r5 = await plantillaParaTraslado(base({ celdas: CELDAS_ES }), { moneda: "USD", clienteId: null });
+    ok(r5.ok && JSON.stringify(r5.ingles) === JSON.stringify({ PEN: false, USD: false }), "la tabla sin celdas en inglés: el inglés apagado (no null)");
+    const sb6 = base({ celdas: CELDAS_ON }); sb6.fallas.push({ tabla: "cotizacion_plantilla_reglas_traslado", op: "select", mensaje: "timeout" });
+    const r6 = await plantillaParaTraslado(sb6, { moneda: "PEN", clienteId: null });
+    ok(!r6.ok && /idioma/.test(r6.detalle) && /timeout/.test(r6.detalle), "la tabla nueva ilegible: ok:false con el motivo (no «sin reglas»)");
+  }
+
+  // (b) leerInglesTraslado.
+  {
+    const a = await leerInglesTraslado(base({ celdas: null }));
+    ok(a.ok && a.ingles === null, "sin la tabla: ingles null");
+    const b = await leerInglesTraslado(base({ celdas: CELDAS_SOLO_USD }));
+    ok(b.ok && b.ingles?.PEN === false && b.ingles?.USD === true, "solo dólares asignado: {PEN:false, USD:true}");
+    const c = await leerInglesTraslado(base({ celdas: CELDAS_ON, plantillas: [CORP, TIA, { ...EN, activa: false }] }));
+    ok(c.ok && c.ingles?.PEN === false && c.ingles?.USD === false, "la plantilla inglesa desactivada no enciende nada");
+    const d = await leerInglesTraslado(base({ celdas: CELDAS_ON, plantillas: [CORP, TIA, { ...EN, idioma: "es_en" }] }));
+    ok(d.ok && d.ingles?.PEN === false && d.ingles?.USD === false, "una plantilla «es_en» (la ejecutiva) no cuenta como inglés");
+    const sbE = base({ celdas: CELDAS_ON }); sbE.fallas.push({ tabla: "cotizacion_plantillas", op: "select", mensaje: "sin conexión" });
+    const e = await leerInglesTraslado(sbE);
+    ok(!e.ok && /sin conexión/.test(e.detalle), "plantillas ilegibles: ok:false");
+  }
+
+  const deps25 = { simular: simularFalso({ n: 0 }) as any, bajarLogo: async () => null, ahoraMs: () => reloj, azar: () => String(Math.random()).slice(2, 8) };
+  const corrida = async (sb: SbFalso, input: any = pedidoIA, ctxExtra: Partial<CtxCotizarIA> = {}) => {
+    const res = await cotizarTrasladoIA({ ...ctxDe(sb, "cv-1", "ct-1"), ...ctxExtra }, input, deps25);
+    return { res, fila: sb.t("cotizaciones").at(-1) as any, pdf: res.envioPendiente ? textoDelPdf(res.envioPendiente.bytes) : null };
+  };
+
+  // (c) De punta a punta en inglés, desde un +51.
+  {
+    const sb = base({ celdas: CELDAS_ON, mensajes: INGLES });
+    const c = await corrida(sb);
+    ok(c.res.accion === "cotizar" && c.res.cotizacion?.decision === "automatico" && !!c.res.envioPendiente,
+      `inglés: cotiza y sale solo (${c.res.cotizacion?.decision} ${JSON.stringify(c.res.derivar ?? "")} ${JSON.stringify(sb.t("crm_acciones_ia").at(-1)?.payload?.motivos ?? "")})`);
+    ok(c.fila?.idioma_pdf === "en" && c.fila?.moneda === "USD", `la fila en inglés y en dólares aunque el número es +51 (${c.fila?.idioma_pdf} ${c.fila?.moneda})`);
+    ok(c.fila?.plantilla_pdf === "traslados_ia_en" && c.fila?.consideraciones_json?.idioma === "en" && c.fila.consideraciones_json.generales.join() === "ENGLISH GENERAL TERM",
+      `las condiciones de la plantilla en inglés, marcadas en inglés (${c.fila?.plantilla_pdf} ${JSON.stringify(c.fila?.consideraciones_json)})`);
+    ok(c.fila?.traslado_json?.idioma_cliente === "en", "la evidencia (idioma_cliente) queda en traslado_json");
+    ok(/^Quotation-.+\.pdf$/.test(c.res.envioPendiente?.nombre ?? "") && /Quotation No\./.test(c.res.envioPendiente?.caption ?? ""),
+      `nombre y caption en inglés (${c.res.envioPendiente?.nombre} · ${c.res.envioPendiente?.caption})`);
+    ok(c.res.cotizacion?.idioma === "en" && /^US\$|USD|\$/.test(c.res.cotizacion?.total ?? ""), `la cotización del turno dice su idioma y el total en dólares (${c.res.cotizacion?.total})`);
+    ok(/[A-Z][a-z]{2} \d{1,2}, \d{4}/.test(c.res.cotizacion?.validez ?? ""), `la validez con el mes en letras (${c.res.cotizacion?.validez})`);
+    const acc = sb.t("crm_acciones_ia").at(-1);
+    ok(acc?.payload?.idioma === "en", "la tarjeta de la bandeja lleva idioma: en");
+    ok((c.pdf ?? "").includes("ENGLISH GENERAL TERM") && (c.pdf ?? "").includes("ENGLISH UNIT DESCRIPTION") && !(c.pdf ?? "").includes("CONDICIÓN DEL TRASLADO"),
+      "el PDF imprime las condiciones en inglés y la unidad descrita en inglés, ninguna de castellano");
+    const re = await pdfDeCotizacion(sb as any, c.fila.id, { bajarLogo: async () => null });
+    ok(textoDelPdf(re.bytes) === c.pdf && re.nombre === c.res.envioPendiente?.nombre, "la relectura imprime lo mismo y con el mismo nombre");
+  }
+  {
+    // Sin la columna de traslados-10, la unidad en inglés sale con la frase del sistema y NO se dice
+    // «falta el SQL de las fotos» (es otra migración).
+    // (La base falsa devuelve la fila entera, no las columnas pedidas: sin la columna, la fila tampoco la trae.)
+    const sb = base({ celdas: CELDAS_ON, mensajes: INGLES }); sb.faltan.traslado_categorias = ["descripcion_cliente_en"];
+    for (const c of sb.t("traslado_categorias")) delete c.descripcion_cliente_en;
+    const c = await corrida(sb);
+    ok(c.res.cotizacion?.decision === "automatico" && !(c.pdf ?? "").includes("ENGLISH UNIT DESCRIPTION"), `sin descripcion_cliente_en: sale igual, sin esa frase (${c.res.cotizacion?.decision})`);
+    const re = await pdfDeCotizacion(sb as any, c.fila.id, { bajarLogo: async () => null });
+    ok(!re.avisos.some((a) => a.codigo === "sin_migracion_fotos"), `y sin el aviso de las fotos (${re.avisos.map((a) => a.codigo).join()})`);
+  }
+
+  // (d) Con el inglés encendido, un cliente en castellano: la fila de siempre.
+  {
+    const sbOn = base({ celdas: CELDAS_ON }), sbOff = base({ celdas: null });
+    const encendido = await corrida(sbOn);
+    const sinTabla = await corrida(sbOff);
+    ok(JSON.stringify(sbOn.t("crm_acciones_ia").at(-1)?.payload) === JSON.stringify(sbOff.t("crm_acciones_ia").at(-1)?.payload) && !("idioma" in (sbOn.t("crm_acciones_ia").at(-1)?.payload ?? {})),
+      "la tarjeta en castellano: el payload de siempre, sin la clave idioma");
+    ok(encendido.fila?.idioma_pdf === "es" && encendido.fila?.moneda === "PEN" && encendido.fila?.plantilla_pdf === "traslados_ia", `castellano con el inglés encendido: castellano y soles (${encendido.fila?.idioma_pdf} ${encendido.fila?.moneda})`);
+    ok(JSON.stringify(encendido.fila) === JSON.stringify(sinTabla.fila), "la misma fila que sin la tabla de cotizaciones-09");
+    ok(!!encendido.pdf && encendido.pdf === sinTabla.pdf && encendido.res.envioPendiente?.nombre === sinTabla.res.envioPendiente?.nombre, "el mismo PDF y el mismo nombre");
+    const enc = encendido.res.cotizacion;
+    ok(enc?.idioma === "es" && /^S\//.test(enc?.total ?? ""), `el total en soles (${enc?.total})`);
+  }
+
+  // (e) El inglés solo en dólares, y el cliente pide soles: soles, condiciones en castellano → revisión.
+  {
+    const sb = base({ celdas: CELDAS_SOLO_USD, mensajes: [...INGLES, "Can you quote it in soles please?"] });
+    const c = await corrida(sb, { ...pedidoIA, cliente_pide_soles: true });
+    ok(c.fila?.idioma_pdf === "en" && c.fila?.moneda === "PEN", `pide soles en inglés: soles y en inglés (${c.fila?.idioma_pdf} ${c.fila?.moneda})`);
+    ok(c.res.cotizacion?.decision === "revision" && !c.res.envioPendiente && (sb.t("crm_acciones_ia").at(-1)?.payload?.motivos ?? []).includes("condiciones_en_otro_idioma"),
+      `sin plantilla inglesa en soles: revisión por condiciones en castellano (${JSON.stringify(sb.t("crm_acciones_ia").at(-1)?.payload?.motivos)})`);
+    const nota = String(sb.t("crm_notas").at(-1)?.texto ?? "");
+    ok(/escribe en inglés/.test(nota) && /pide la cotización en soles/.test(nota) && /INGLÉS/.test(nota), "la nota del ejecutivo dice el idioma y el pedido de soles");
+    // Sin «soles» en sus mensajes, la marca del modelo no basta: dólares y la plantilla inglesa.
+    const sb2 = base({ celdas: CELDAS_SOLO_USD, mensajes: INGLES });
+    const c2 = await corrida(sb2, { ...pedidoIA, cliente_pide_soles: true });
+    ok(c2.fila?.moneda === "USD" && c2.fila?.plantilla_pdf === "traslados_ia_en" && c2.res.cotizacion?.decision === "automatico", `pide soles solo el modelo: dólares (${c2.fila?.moneda})`);
+  }
+
+  // (f) Sin la columna idioma_pdf: la cotización en inglés no se guarda; en castellano sí, como antes.
+  {
+    const sb = base({ celdas: CELDAS_ON, mensajes: INGLES }); sb.faltan.cotizaciones = ["idioma_pdf"];
+    const c = await corrida(sb);
+    ok(c.res.accion === "derivar" && /cotizaciones-04/.test(c.res.derivar?.motivo ?? "") && sb.t("cotizaciones").length === 0, `inglés sin idioma_pdf: deriva sin guardar (${c.res.derivar?.motivo})`);
+    const sbE = base({ celdas: CELDAS_ON }); sbE.faltan.cotizaciones = ["idioma_pdf"];
+    const e = await corrida(sbE);
+    ok(e.res.accion === "cotizar" && !("idioma_pdf" in (e.fila ?? {})), `castellano sin idioma_pdf: se guarda sin ella (${e.res.accion})`);
+  }
+
+  // (g) El idioma lo decide el código: el input del modelo no lo mueve; el del agente (ctx.idioma) sí.
+  {
+    const trampa = { ...pedidoIA, idioma: "en", idioma_cliente: "en", moneda: "USD", pide_soles: true, telefono: "+447700900123" };
+    const c = await corrida(base({ celdas: CELDAS_ON }), trampa);
+    ok(c.fila?.idioma_pdf === "es" && c.fila?.moneda === "PEN", `el input del modelo no cambia idioma ni moneda (${c.fila?.idioma_pdf} ${c.fila?.moneda})`);
+    const d = await corrida(base({ celdas: CELDAS_ON }), pedidoIA, { idioma: { cliente: "en", ingles: { PEN: true, USD: true } } });
+    ok(d.fila?.idioma_pdf === "en" && d.fila?.moneda === "USD", `el idioma que calculó el agente manda sobre la detección (${d.fila?.idioma_pdf} ${d.fila?.moneda})`);
+    const e = await corrida(base({ celdas: CELDAS_ON, mensajes: INGLES }), pedidoIA, { idioma: { cliente: "en", ingles: null } });
+    ok(e.fila?.idioma_pdf === "es" && e.fila?.moneda === "PEN", "con el inglés apagado (ingles: null) el agente no lo enciende");
+    const f = await corrida(base({ celdas: null, mensajes: INGLES }));
+    ok(f.fila?.idioma_pdf === "es" && f.fila?.moneda === "PEN" && !("idioma" in (f.fila?.consideraciones_json ?? {})), "sin cotizaciones-09, un cliente en inglés sigue en castellano (lo de siempre)");
+    // El mismo pedido en castellano y luego en inglés: dos firmas (no se le contesta «ya te la envié»).
+    const sbF = base({ celdas: CELDAS_ON });
+    await corrida(sbF);
+    const g = await corrida(sbF, pedidoIA, { idioma: { cliente: "en", ingles: { PEN: true, USD: true } } });
+    ok(sbF.t("cotizaciones").length === 2 && g.fila?.idioma_pdf === "en", `castellano y después inglés: otra cotización (${sbF.t("cotizaciones").length})`);
+  }
+
+  // (h) El idioma del SIMULADOR (lib/traslados/simular-idioma.ts): el mismo interruptor que la IA, y una
+  //     lectura que falla NO es un inglés apagado.
+  {
+    const SI = await import("../lib/traslados/simular-idioma");
+    const ent = (x: Partial<EntradaSimulador> = {}): EntradaSimulador => ({ origen: "Aeropuerto Jorge Chávez", destino: "Miraflores", telefono: "51966707225", ...x } as EntradaSimulador);
+    const ON = { PEN: true, USD: true }, SOLO_USD = { PEN: false, USD: true }, OFF = { PEN: false, USD: false };
+    const ahora = Date.parse("2026-10-23T15:00:00Z");
+    const caso = (x: Partial<Parameters<typeof SI.idiomaDeLaSimulacion>[1]>, e = ent()) =>
+      SI.idiomaDeLaSimulacion(e, { mensajes: null, idiomaPedido: undefined, pideSoles: false, ingles: ON, errorIngles: null, ...x }, ahora);
+    const ordenChat = [...INGLES.slice(0, 2), "Hola, en realidad quiero el traslado mañana temprano por favor"];
+    // Orden del chat (antiguo → reciente): dos en inglés y uno en castellano → mayoría inglés.
+    const a = caso({ mensajes: ordenChat });
+    ok(a.idioma.codigo === "ingles" && a.idioma.idioma === "en" && a.entrada.idioma_cliente === "en", `mensajes en el orden del chat: inglés por mayoría (${a.idioma.codigo})`);
+    const b = caso({ mensajes: ["Hola, quiero un traslado al aeropuerto", "¿Cuánto cuesta para dos personas?"] });
+    ok(b.idioma.codigo === "castellano" && b.idioma.idioma === "es" && !("idioma_cliente" in b.entrada), "en castellano: sin idioma_cliente");
+    const c = caso({ mensajes: INGLES, errorIngles: "timeout" });
+    ok(c.idioma.codigo === "no_se_pudo_leer" && c.idioma.idioma === "es" && /timeout/.test(c.idioma.detalle) && !("idioma_cliente" in c.entrada) && !/apagado/i.test(c.idioma.detalle),
+      `una lectura fallida: no_se_pudo_leer con el error, en castellano, y no dice «apagado» (${c.idioma.detalle})`);
+    const d = caso({ mensajes: INGLES, ingles: null });
+    ok(d.idioma.codigo === "ingles_apagado" && /cotizaciones-09/.test(d.idioma.detalle), "sin la tabla: ingles_apagado nombrando el SQL");
+    const e = caso({ mensajes: INGLES, ingles: OFF });
+    ok(e.idioma.codigo === "ingles_apagado" && /ninguna celda/.test(e.idioma.detalle), "sin celda inglesa: ingles_apagado");
+    const f = caso({ mensajes: INGLES, ingles: SOLO_USD, pideSoles: true });
+    ok(f.idioma.idioma === "en" && f.entrada.idioma_cliente === "en" && f.entrada.pide_soles === true, "pide_soles suelto (sin idioma_cliente) cuenta con el cliente en inglés");
+    const g = caso({ mensajes: ["Hola, quiero un traslado al aeropuerto"], pideSoles: true });
+    ok(!("pide_soles" in g.entrada), "en castellano, pide_soles no cuenta");
+    const h = caso({ idiomaPedido: "otro" });
+    ok(h.idioma.codigo === "otro_idioma" && h.entrada.idioma_cliente === "otro", "sin mensajes vale idioma_cliente");
+    const h2 = caso({ mensajes: INGLES, idiomaPedido: "es" });
+    ok(h2.idioma.codigo === "ingles", "con mensajes, los mensajes mandan sobre idioma_cliente");
+    const i = caso({ mensajes: INGLES, pideSoles: true }, ent({ pide_dolares: true }));
+    ok(!("pide_soles" in i.entrada) && !("pide_dolares" in i.entrada), "soles y dólares a la vez: ninguno (el defecto del idioma)");
+    const j = caso({}, ent({ idioma_cliente: "en", pide_soles: true }));
+    ok(j.idioma.codigo === "sin_evidencia" && !("idioma_cliente" in j.entrada) && !("pide_soles" in j.entrada), "la entrada validada no cuela idioma_cliente ni pide_soles por su cuenta");
+    // El cuerpo.
+    ok(JSON.stringify(SI.mensajesDelCuerpo({})) === JSON.stringify({ ok: true, mensajes: null }), "sin mensajes_cliente: null");
+    ok(!SI.mensajesDelCuerpo({ mensajes_cliente: "hola" }).ok && !SI.mensajesDelCuerpo({ mensajes_cliente: ["a", 3] }).ok, "mensajes_cliente que no es una lista de textos: error");
+    ok(!SI.mensajesDelCuerpo({ mensajes_cliente: Array(SI.MAX_MENSAJES_CLIENTE + 1).fill("x") }).ok, "más de 10 mensajes: error");
+    const largo = SI.mensajesDelCuerpo({ mensajes_cliente: ["😀".repeat(600), "   ", "ok"] });
+    ok(largo.ok && largo.mensajes!.length === 2 && Array.from(largo.mensajes![0]).length === SI.MAX_CARACTERES_MENSAJE, "cada texto se recorta a 500 caracteres completos y los vacíos se quitan");
+    // La ruta: el error de la lectura llega al motor, y nunca se escribe nada con los mensajes.
+    const q = (x: string) => x.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    const ruta = q(readFileSync("app/api/traslados/simular/route.ts", "utf8"));
+    ok(/if \(li\.ok\) ingles = li\.ingles; else errorIngles = li\.detalle/.test(ruta) && /idiomaDeLaSimulacion\(v\.entrada, \{[^}]*errorIngles \}\)/.test(ruta),
+      "ruta: el error de leerInglesTraslado viaja como errorIngles");
+    ok(!/\.insert\(|\.update\(|\.upsert\(/.test(ruta), "ruta: el simulador no escribe en la base");
+  }
+}
+
+// ── 26. Revisión de seguridad S1 (23-10-2026): instrucciones de pago en el texto libre y dinero en el texto del modelo ──
+seccion("26. S1 · hallazgos 1 y 2: lo nuevo bloquea lo que pasaba y deja pasar lo legítimo; nuevo ⊇ viejo, con cada divergencia DECLARADA");
+// El algoritmo de ANTES de la revisión S1, COPIADO LITERAL de lib/traslados/texto-libre.ts (sin sus
+// comentarios). Lo nuevo solo puede ser MÁS estricto: todo lo que el viejo bloqueaba lo bloquea el
+// nuevo, y lo que el nuevo bloquea de más tiene que estar en las listas declaradas de abajo.
+const VIEJO_TL = (() => {
+  const MAX_REFERENCIA = 80;
+  const MAX_ATENCION = 60;
+  const minusculas = (s: string): string =>
+    String(s ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  const porPalabra = (s: string): string => ` ${minusculas(s).replace(/[^a-z0-9]+/g, " ").trim()} `;
+  const SIMBOLO = String.raw`(?:S\/\.?|US\$|U\$S|USD|PEN|\$|soles?|d[oó]lares?)`;
+  const NUM = String.raw`(\d[\d.,]*)`;
+  const IMPORTE_PREFIJO = new RegExp(String.raw`(?:^|[^A-Za-z0-9])${SIMBOLO}\s*${NUM}`, "gi");
+  const IMPORTE_SUFIJO = new RegExp(String.raw`${NUM}\s*(?:soles?|d[oó]lares?|USD|PEN|S\/)(?![A-Za-z])`, "gi");
+  function leerImporte(s: string): number | null {
+    let t = String(s ?? "").replace(/[.,]+$/, "");
+    if (!t) return null;
+    const tienePunto = t.includes("."), tieneComa = t.includes(",");
+    if (tienePunto && tieneComa) {
+      const dec = t.lastIndexOf(".") > t.lastIndexOf(",") ? "." : ",";
+      const miles = dec === "." ? "," : ".";
+      t = t.split(miles).join("").replace(dec, ".");
+    } else if (tieneComa) {
+      t = /^\d{1,3}(,\d{3})+$/.test(t) ? t.replace(/,/g, "") : t.replace(",", ".");
+    } else if (tienePunto && /^\d{1,3}(\.\d{3}){2,}$/.test(t)) {
+      t = t.replace(/\./g, "");
+    }
+    const n = Number(t);
+    return Number.isFinite(n) ? n : null;
+  }
+  function importesEnTexto(texto: string): number[] {
+    const out: number[] = [];
+    const s = String(texto ?? "");
+    for (const re of [IMPORTE_PREFIJO, IMPORTE_SUFIJO]) {
+      re.lastIndex = 0;
+      for (const m of s.matchAll(re)) {
+        const n = leerImporte(m[1]);
+        if (n != null) out.push(n);
+      }
+    }
+    return out;
+  }
+  const MONEDA = String.raw`(?:nuevos?\s+soles|soles?|dolares?(?:\s+americanos)?|euros?|usd|pen|eur|us\$|u\$s?|s\/\.?|\$|€)`;
+  const CIFRA = String.raw`\d+(?:[.,]\d+)*`;
+  const PALABRA_NUMERO = String.raw`(?:cero|un[oa]?|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|dieci[a-z]+|veinte|veinti[a-z]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien|ciento|quinient[oa]s|[a-z]+cient[oa]s|mil|millon(?:es)?)`;
+  const EN_LETRAS = String.raw`${PALABRA_NUMERO}(?:\s+(?:y\s+)?${PALABRA_NUMERO})*`;
+  const MONTO = String.raw`(?:${CIFRA}|${EN_LETRAS})`;
+  const MONEDA_Y_MONTO = new RegExp(String.raw`(?:^|[^a-z0-9])${MONEDA}\s*${MONTO}(?![a-z0-9])`);
+  const MONTO_Y_MONEDA = new RegExp(String.raw`(?:^|[^a-z0-9])${MONTO}\s*${MONEDA}(?![a-z])`);
+  const PORCENTAJE = /%|\bpor\s*ciento\b/;
+  const PALABRAS_DINERO = /\b(?:descuentos?|rebajas?|rebajar|rebajamos|gratis|gratuit[oa]s?|igv)\b/;
+  const PISTA_Y_CIFRA = new RegExp(
+    String.raw`\b(?:total|precios?|costos?|cuesta|cuestan|costaria|costara|costaran|cobr[a-z]*|tarifas?|monto|importe|pagar|pago|abonar|seran|seria|saldria|aprox[a-z]*|alrededor|valor|vale)\b` +
+    String.raw`(?:[^a-z0-9]+[a-z]+){0,3}?[^a-z0-9]+${CIFRA}` +
+    String.raw`(?![0-9]|[.,][0-9]|[-/:][0-9]|\s*(?:h\b|hrs?\b|horas?\b|am\b|pm\b|a\.\s?m|p\.\s?m|pax\b|pasajer|persona|maleta|kg\b|kilo|km\b|min|dia|noche|asiento|unidad|vehicul|bus\b|van\b|auto\b|de\s+(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|setiembre|septiembre|octubre|noviembre|diciembre)))`,
+  );
+  const MONEDA_INGLES = String.raw`(?:us\s+dollars?|dollars?|bucks?|${MONEDA})`;
+  const PALABRA_NUMERO_INGLES = String.raw`(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundreds?|thousands?|millions?)`;
+  const EN_LETRAS_INGLES = String.raw`${PALABRA_NUMERO_INGLES}(?:[\s-]+(?:and\s+)?${PALABRA_NUMERO_INGLES})*`;
+  const MONTO_INGLES = String.raw`(?:${CIFRA}|${EN_LETRAS_INGLES}|${EN_LETRAS})`;
+  const MONEDA_Y_MONTO_INGLES = new RegExp(String.raw`(?:^|[^a-z0-9])${MONEDA_INGLES}\s*${MONTO_INGLES}(?![a-z0-9])`);
+  const MONTO_Y_MONEDA_INGLES = new RegExp(String.raw`(?:^|[^a-z0-9])${MONTO_INGLES}\s*${MONEDA_INGLES}(?![a-z])`);
+  const PORCENTAJE_INGLES = /\bper\s*cent\b|\bpercent\b/;
+  const PALABRAS_DINERO_INGLES = /\b(?:discounts?|discounted|complimentary|cheap|cheaper|cheapest|tax|taxes|vat)\b|(?<!feel\s)\bfree\b|\d\s*%?\s*off\b/;
+  const MESES_INGLES = String.raw`(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)`;
+  const PISTA_Y_CIFRA_INGLES = new RegExp(
+    String.raw`\b(?:total|prices?|costs?|fees?|rates?|charges?|charged|pay|around|approx[a-z]*|about|would\s+be)\b` +
+    String.raw`(?:[^a-z0-9]+(?!${MESES_INGLES}\b)[a-z]+){0,3}?[^a-z0-9]+${CIFRA}` +
+    String.raw`(?![0-9]|[.,][0-9]|[-/:][0-9]|\s*(?:h\b|hrs?\b|horas?\b|am\b|pm\b|a\.\s?m|p\.\s?m|pax\b|pasajer|persona|maleta|kg\b|kilo|km\b|min|dia|noche|asiento|unidad|vehicul|bus\b|van\b|auto\b|de\s+(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|setiembre|septiembre|octubre|noviembre|diciembre)` +
+    String.raw`|people\b|persons?\b|passengers?\b|bags?\b|suitcases?\b|luggage\b|minutes?\b|hours?\b|days?\b|nights?\b|seats?\b|flights?\b|${MESES_INGLES}\b|st\b|nd\b|rd\b|th\b|of\s+${MESES_INGLES}\b))`,
+  );
+  function mencionaDineroIngles(t: string): boolean {
+    return MONEDA_Y_MONTO_INGLES.test(t) || MONTO_Y_MONEDA_INGLES.test(t)
+      || PORCENTAJE_INGLES.test(t) || PALABRAS_DINERO_INGLES.test(t) || PISTA_Y_CIFRA_INGLES.test(t);
+  }
+  function mencionaDinero(texto: string, idioma: IdiomaTexto = "es"): boolean {
+    const t = minusculas(texto);
+    if (!t.trim()) return false;
+    const castellano = importesEnTexto(texto).length > 0
+      || MONEDA_Y_MONTO.test(t) || MONTO_Y_MONEDA.test(t)
+      || PORCENTAJE.test(t) || PALABRAS_DINERO.test(t) || PISTA_Y_CIFRA.test(t);
+    return castellano || (idioma === "en" && mencionaDineroIngles(t));
+  }
+  type IdiomaTexto = "es" | "en";
+  type MotivoTextoLibre = "enlace" | "importe" | "palabra_de_pago" | "numero_largo" | "muy_largo";
+  const ETIQUETA_TEXTO_LIBRE: Record<MotivoTextoLibre, string> = {
+    enlace: "trae un enlace",
+    importe: "menciona dinero",
+    palabra_de_pago: "trae palabras de pago (Yape, Plin, depósito, cuenta…)",
+    numero_largo: "trae un número de 6 o más dígitos (un teléfono o una cuenta)",
+    muy_largo: `pasa de ${MAX_REFERENCIA} caracteres`,
+  };
+  const ENLACE = /https?:\/\/|www\.|\b[a-z0-9-]+\.(?:com|pe|net|org|io|ly|me|app|info|link|co|xyz|site|online|store|shop|gl|gg|to|tk|click|top|biz)\b/;
+  const NUMERO_LARGO = /(?:\d[\s.\-]?){5}\d/;
+  const PALABRAS_PAGO = [
+    "yape", "yapea", "yapear", "yapeame", "yapeo", "plin", "plinea", "plinear", "plineame",
+    "deposito", "depositos", "deposite", "depositen", "depositar", "deposita", "depositas", "depositame",
+    "transferencia", "transferencias", "transfiera", "transfieran", "transferir", "transfiere", "transfieres",
+    "cuenta", "cuentas", "cci", "banco", "bcp", "bbva", "interbank", "scotiabank",
+    "pago", "pagos", "pagar", "pague", "paguen", "abono", "abonar", "abone", "abonen",
+  ];
+  const PALABRAS_PAGO_INGLES = [
+    "paypal", "zelle", "venmo", "wire", "deposit", "deposits", "account", "accounts", "bank", "banks",
+    "pay", "payment", "payments",
+  ];
+  const FRASES_PAGO_INGLES = ["western union"];
+  const traePalabraDePago = (crudo: string, idioma: IdiomaTexto): boolean => {
+    const pal = porPalabra(crudo);
+    if (PALABRAS_PAGO.some((p) => pal.includes(` ${p} `))) return true;
+    if (idioma !== "en") return false;
+    return PALABRAS_PAGO_INGLES.some((p) => pal.includes(` ${p} `)) || FRASES_PAGO_INGLES.some((p) => pal.includes(` ${p} `));
+  };
+  function textoLibreSospechoso(s: string | null | undefined, idioma: IdiomaTexto = "es"): MotivoTextoLibre | null {
+    const crudo = String(s ?? "");
+    if (!crudo.trim()) return null;
+    const t = minusculas(crudo);
+    if (ENLACE.test(t)) return "enlace";
+    if (importesEnTexto(crudo).length > 0 || mencionaDinero(crudo, idioma)) return "importe";
+    if (traePalabraDePago(crudo, idioma)) return "palabra_de_pago";
+    if (NUMERO_LARGO.test(t)) return "numero_largo";
+    if (Array.from(crudo.trim()).length > MAX_REFERENCIA) return "muy_largo";
+    return null;
+  }
+  const unaLinea = (s: string): string => String(s ?? "").replace(/\s+/g, " ").trim();
+  function referenciaImprimible(s: string | null | undefined, idioma: IdiomaTexto = "es"): string | null {
+    const t = unaLinea(String(s ?? ""));
+    if (!t || textoLibreSospechoso(t, idioma)) return null;
+    return t;
+  }
+  function atencionImprimible(s: string | null | undefined, idioma: IdiomaTexto = "es"): string | null {
+    const t = unaLinea(String(s ?? ""));
+    if (!t || textoLibreSospechoso(t, idioma)) return null;
+    const c = Array.from(t);
+    return c.length <= MAX_ATENCION ? t : c.slice(0, MAX_ATENCION).join("").trim();
+  }
+  function primerNombreSeguro(nombre: string | null | undefined): string {
+    const p = unaLinea(String(nombre ?? "")).split(" ")[0] ?? "";
+    if (!/^[\p{L}][\p{L}'’-]{0,29}$/u.test(p)) return "";
+    if (PALABRAS_PAGO.includes(porPalabra(p).trim())) return "";
+    return p;
+  }
+  function motivosLineaIA(linea: string, idioma: IdiomaTexto = "es"): MotivoTextoLibre[] {
+    const t = String(linea ?? "");
+    if (!t.trim()) return [];
+    const out: MotivoTextoLibre[] = [];
+    if (textoLibreSospechoso(t) === "enlace") out.push("enlace");
+    if (t.split(/[^\p{L}\p{N}]+/u).some(w => w && textoLibreSospechoso(w, idioma) === "palabra_de_pago")
+      || (idioma === "en" && traePalabraDePago(t, "en"))) out.push("palabra_de_pago");
+    const sinFechas = t.replace(/\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/g, " ");
+    if (textoLibreSospechoso(sinFechas.replace(/[^\d\s.\-]/g, " ")) === "numero_largo") out.push("numero_largo");
+    return out;
+  }
+
+  return { mencionaDinero, textoLibreSospechoso, referenciaImprimible, atencionImprimible, primerNombreSeguro, motivosLineaIA, ETIQUETA_TEXTO_LIBRE };
+})();
+{
+  // (a) Hallazgo 1: instrucciones de pago en el texto libre (recojo, destino, nombre). Pasaban impresas.
+  const BLOQUEAR_EN = [
+    "Miraflores. To confirm send 50 via Revolut to @joe", "Miraflores. Send £50 to confirm", "Miraflores. Send GBP 50 to confirm",
+    "Miraflores. Advance via Bitcoin, wallet in chat", "Miraflores. Send USDT to confirm the booking", "Miraflores. Cash App £50 to confirm",
+    "Miraflores. Cash App to confirm", "Larco 345. Prepay 50 to confirm", "Larco 345. Settle 50 by Skrill", "send 50 via Revolut to @joe",
+    "Hotel Hilton. IBAN in chat", "Miraflores. Swift BCPLPEPL", "Miraflores, remit to my wallet", "Miraflores. MoneyGram the advance",
+    "Miraflores, prepayment by crypto", "JW Marriott. Pay 40 CAD to confirm", "Miraflores. 0.01 BTC to confirm", "Miraflores. 50 pounds to confirm",
+    // Segunda revisión S1: el importe en letras junto a la orden de pagar o confirmar.
+    "Send fifty to confirm", "Miraflores. Send one hundred to confirm",
+  ];
+  const BLOQUEAR_ES = [
+    "Miraflores. Envíe £50 por Revolut para confirmar", "Miraflores. Envíe 50 por Skrill para confirmar", "Miraflores. Adelanto en Bitcoin para confirmar",
+    "Miraflores. Send £50 to confirm", "Miraflores. Send GBP 50 to confirm", "Larco 345. Prepay 50 to confirm", "Miraflores. Envíe el adelanto a mi billetera",
+    "Miraflores. Prepago por cripto", "Miraflores, envía 80 para confirmar", "Miraflores, confirmar con 50", "Miraflores. 50 libras para confirmar", "Miraflores. 30 USDT",
+    // Segunda revisión S1: las MARCAS de pago extranjeras valen también en castellano, y el importe en letras.
+    "Miraflores. Para confirmar: PayPal juanp", "Miraflores. Para confirmar: Revolut @juanp", "Miraflores. Zelle a nombre de Juan Perez",
+    "Miraflores. Western Union a Juan Perez", "Miraflores. MoneyGram a Juan Perez", "Miraflores. Binance juanp", "Miraflores. Venmo @juanp",
+    "Hotel X. Envíe cincuenta para confirmar", "Miraflores. Confirmar con ciento veinte",
+  ];
+  for (const t of BLOQUEAR_EN) {
+    ok(T.textoLibreSospechoso(t, "en") != null && T.referenciaImprimible(t, "en") === null, `en inglés, «${t}» ya no se imprime (${T.textoLibreSospechoso(t, "en")})`);
+    ok(VIEJO_TL.textoLibreSospechoso(t, "en") == null || T.textoLibreSospechoso(t, "en") != null, `«${t}»: lo que el viejo bloqueaba se sigue bloqueando`);
+  }
+  for (const t of BLOQUEAR_ES) ok(T.textoLibreSospechoso(t) != null && T.referenciaImprimible(t) === null && T.textoLibreSospechoso(t, "en") != null, `en castellano (y en inglés), «${t}» ya no se imprime (${T.textoLibreSospechoso(t)})`);
+  // Los tres casos de la segunda revisión, con su motivo.
+  ok(T.textoLibreSospechoso("Miraflores. Para confirmar: PayPal juanp", "es") === "palabra_de_pago", "«Para confirmar: PayPal juanp» en castellano → palabra_de_pago (la marca vale en los dos idiomas)");
+  ok(T.textoLibreSospechoso("Hotel X. Envíe cincuenta para confirmar", "es") === "importe", "«Envíe cincuenta para confirmar» en castellano → importe (el número en letras con la orden)");
+  ok(T.textoLibreSospechoso("Send fifty to confirm", "en") === "importe" && T.textoLibreSospechoso("Send fifty to confirm", "es") === "importe", "«Send fifty to confirm» → importe (en los dos idiomas)");
+  ok(VIEJO_TL.textoLibreSospechoso("Miraflores. Para confirmar: PayPal juanp", "es") == null && VIEJO_TL.textoLibreSospechoso("Hotel X. Envíe cincuenta para confirmar", "es") == null,
+    "…y con el algoritmo viejo pasaban (el escenario es el que se rompió)");
+  // Las palabras GENÉRICAS del inglés siguen siendo solo del inglés: en castellano «pay», «bank», «wire»… no se escriben como dirección.
+  for (const t of ["Miraflores, pay by bank wire", "Hotel, deposit to my account", "Miraflores, prepaid remittance"]) {
+    ok(T.textoLibreSospechoso(t, "en") === "palabra_de_pago" && T.textoLibreSospechoso(t, "es") == null, `«${t}»: palabra de pago en inglés, nada en castellano (genérica, solo inglés)`);
+  }
+  // Un número en letras SIN la orden de pagar o confirmar no es una orden de pago; y una hora en letras tampoco.
+  for (const t of ["Calle Cincuenta 12", "Hotel Ciento Veinte", "Confirmar a las veinte", "Enviar a cincuenta metros del hotel", "Confirm at twenty past ten", "Send twenty five people"]) {
+    ok(T.textoLibreSospechoso(t, "es") == null && T.textoLibreSospechoso(t, "en") == null, `«${t}» se sigue imprimiendo (sin orden de pago, o es una hora o lo que se cuenta)`);
+  }
+  ok(T.atencionImprimible("John Revolut 50 to confirm", "en") === null && T.atencionImprimible("John Revolut 50 to confirm") === null,
+    "el nombre de perfil «John Revolut 50 to confirm» no sale en «Atención» (en inglés por Revolut; en los dos por el respaldo estructural)");
+  ok(VIEJO_TL.atencionImprimible("John Revolut 50 to confirm", "en") === "John Revolut 50 to confirm", "…y con el algoritmo viejo SÍ salía (el escenario es el que se rompió)");
+  const reproducidos = [...BLOQUEAR_EN.filter((t) => VIEJO_TL.textoLibreSospechoso(t, "en") == null), ...BLOQUEAR_ES.filter((t) => VIEJO_TL.textoLibreSospechoso(t) == null)];
+  ok(reproducidos.length >= 18, `el algoritmo viejo reproduce el defecto: ${reproducidos.length} de ${BLOQUEAR_EN.length + BLOQUEAR_ES.length} pasaban`);
+  // El respaldo estructural va como «importe» (una orden de pagar o confirmar una cifra), y lo ve la nota.
+  ok(T.textoLibreSospechoso("Larco 345. Prepay 50 to confirm") === "importe" && T.textoLibreSospechoso("Miraflores, confirmar con 50") === "importe", "el respaldo estructural cuenta como «importe»");
+  ok(Object.keys(T.ETIQUETA_TEXTO_LIBRE).length === 5 && JSON.stringify(T.ETIQUETA_TEXTO_LIBRE) === JSON.stringify(VIEJO_TL.ETIQUETA_TEXTO_LIBRE), "los cinco motivos de siempre: no hay un motivo nuevo que la nota o la bandeja no sepan pintar");
+
+  // (b) Lo que tiene que seguir imprimiéndose: direcciones y hoteles de Lima, en los dos idiomas.
+  const DIRECCIONES = [
+    "Av. Larco 345, Miraflores", "Hotel Belmond Miraflores Park", "Jr. de la Unión 1050", "Calle Confirmación?", "Av. José Larco 1232, Miraflores",
+    "Av. Pardo 610", "Av. Arequipa 4545, Miraflores", "Av. Javier Prado Este 1066, San Isidro", "Calle Schell 326", "Av. Benavides 220", "Av. La Paz 1101",
+    "Calle Alcanfores 425", "Jr. Huallaga 520, Cercado de Lima", "Av. Abancay 210", "Av. Grau 1520, Barranco", "Av. Brasil 2950, Magdalena",
+    "Av. Salaverry 2800", "Av. Petit Thouars 5356", "Av. Angamos Oeste 1200", "Av. Primavera 1050, Surco", "Av. El Polo 670, Surco",
+    "Calle Las Begonias 441, San Isidro", "Av. Camino Real 1050", "Av. Los Conquistadores 1130", "Av. Santa Cruz 875", "Malecón Cisneros 1244",
+    "Malecón de la Reserva 1035", "JW Marriott Lima", "Hilton Lima Miraflores", "Casa Andina Premium Miraflores", "Sheraton Lima Historic Center",
+    "The Westin Lima", "Swissôtel Lima", "Costa del Sol Wyndham Lima Airport", "Radisson Red Miraflores", "Hyatt Centric San Isidro", "Atton San Isidro",
+    "Pullman Lima Miraflores", "Novotel Lima San Isidro", "Ibis Larco Miraflores", "Courtyard by Marriott Lima Miraflores", "Holiday Inn Lima Airport",
+    "Thunderbird Hotel Carlos V", "Hotel Estelar Miraflores", "Dazzler Lima", "Arawi Miraflores", "Tierra Viva Miraflores Larco", "Hotel B, Barranco",
+    "Country Club Lima Hotel", "Hotel Libertador San Isidro", "DoubleTree El Pardo", "Aeropuerto Jorge Chávez, Terminal 1",
+    "Urb. Santa Patricia Mz. B Lt. 12, La Molina", "Av. Larco 1150 Dpto 1502", "Calle Dos de Mayo 380, San Isidro", "Av. Primavera 2390 Of. 501",
+    "Torre B piso 12, Av. Rivera Navarrete 451", "Av. Paseo de la República 3755", "Av. Aviación 2990, San Borja", "Calle Los Pinos 123",
+    "Jr. Cusco 251, Lima", "Av. Tacna 610", "Plaza San Martín", "Parque Kennedy", "Ovalo Gutiérrez", "Larcomar", "Jockey Plaza", "Real Plaza Salaverry",
+    "Mall del Sur", "Puerta 3 del Jockey Club", "Estadio Nacional, puerta 12", "Embajada de Estados Unidos, Av. La Encalada 1765",
+    "Clínica Ricardo Palma, Av. Javier Prado Este 1066", "Universidad de Lima, Av. Javier Prado Este 4600", "Calle Libertad 120", "Av. Los Libertadores 155",
+    "Calle Las Orquídeas 585", "Calle Esperanza 120, Miraflores", "Av. 28 de Julio 1100", "Av. 2 de Mayo 1545", "Calle 21 número 750, Corpac",
+    "Hotel Sol de Oro, San Antonio 255, Miraflores", "Lima 15074", "Callao 07001", "Av. Elmer Faucett 3400", "Casa Republica Barranco",
+    "Second Home Peru, Domeyer 366", "Hotel Antigua Miraflores, Av. Grau 350", "Miraflores Park Plaza", "Av. Libertad 500", "Calle Libra 23, Surco",
+    "Calle Remigio Silva 200", "Terminal Terrestre Cruz del Sur, Av. Javier Prado 1109", "Oltursa, Av. Aramburú 1160", "Puerto del Callao, muelle 5",
+    "Airport transfer to JW Marriott", "Hotel Belmond, Miraflores", "Hilton Garden Inn", "Room 405, Hilton Lima", "Gate 12, international arrivals",
+    "Pick me up at the lobby, room 1204", "Apartment 802, Av. Pardo 140", "Near Kennedy Park, Diagonal 380", "Larco Ave 1232, 5th floor",
+    "Sheraton, confirm at the front desk", "Envíenme el chofer a la puerta 2", "Confirmar en recepción", "Recojo en Av. Larco 345, confirmo al llegar",
+    "Transfer 50 meters from the hotel", "Miraflores. Transfer the 50 to me", "Hotel 80 Larco, airport transfer",
+  ];
+  let imprimen = 0;
+  for (const t of DIRECCIONES) for (const id of ["es", "en"] as const) {
+    if (T.referenciaImprimible(t, id) === t.replace(/\s+/g, " ").trim()) imprimen++;
+    else ok(false, `«${t}» (${id}) tendría que seguir imprimiéndose (${T.textoLibreSospechoso(t, id)})`);
+  }
+  ok(imprimen === DIRECCIONES.length * 2, `${DIRECCIONES.length} direcciones y hoteles se siguen imprimiendo en los dos idiomas (${imprimen}/${DIRECCIONES.length * 2})`);
+  // La medición de falsos positivos DECLARADA: lo único que el corpus de direcciones pierde son nombres
+  // que contienen una palabra nueva de pago (no se encontró ninguno real en Lima; si aparece, el
+  // perjuicio es solo que la referencia no se imprime y la cotización la revisa un ejecutivo).
+  // Segunda revisión S1: las marcas valen en los dos idiomas («Calle Swift», «Hotel Iban» ya tampoco se
+  // imprimen en castellano), y un número en letras con un «confirmar» cuenta como la cifra («Calle Veinte,
+  // confirmar al llegar», igual que «Calle 20, confirmar al llegar»). Medido sobre las DIRECCIONES de
+  // arriba en los dos idiomas: ninguna más deja de imprimirse.
+  const FP_DECLARADOS: [string, "es" | "en"][] = [["Av. El Adelanto 345", "es"], ["Calle Swift 12", "en"], ["Hotel Iban", "en"],
+    ["Calle Swift 12", "es"], ["Hotel Iban", "es"], ["Calle Veinte, confirmar al llegar", "es"], ["Calle Veinte, confirmar al llegar", "en"]];
+  for (const [t, id] of FP_DECLARADOS) ok(T.textoLibreSospechoso(t, id) != null && VIEJO_TL.textoLibreSospechoso(t, id) == null, `falso positivo DECLARADO: «${t}» (${id}) ya no se imprime`);
+  // «transfer» NUNCA es una palabra de pago (es el servicio que se cotiza), ni con una cifra.
+  for (const t of ["Airport transfer", "Transfer 50 to Miraflores", "the transfer is at 10:30", "Hotel transfer 2 pax"]) ok(T.textoLibreSospechoso(t, "en") == null && T.textoLibreSospechoso(t) == null, `«${t}»: «transfer» no es una palabra de pago`);
+  // Lo que se imprime en la fila (las casos de la sección 18) no cambia con la revisión S1.
+  const r18 = M.evaluarTraslado(pedido(), ctx);
+  for (const t of DIRECCIONES.slice(0, 40)) for (const id of [undefined, "en"] as const) {
+    const fila = C.filaCotizacionTraslado(r18, { ...entradaDe(pedido()), destino: t }, { convId: "c", clienteId: null, atencion: "Ana", config, firma: "f", hoy: HOY, ...(id ? { idioma: id } : {}) });
+    ok(fila.destino === `Miraflores (${t})`.slice(0, 300) || fila.destino === "Miraflores", `la fila imprime «${t}» como antes (${fila.destino})`);
+    ok(C.impresosSospechosos(fila, id ?? "es").length === 0, `la fila que arma la IA nunca es sospechosa para el respaldo (${fila.destino})`);
+  }
+
+  // (c) Hallazgo 2: dinero en el texto del modelo, tras una palabra de precio, en letras o con £/GBP.
+  const DINERO_EN = ["The total would be one hundred fifty.", "That will be 150.", "It's 150 for the van.", "It comes to 150 per leg.", "the fare is 150", "fare: 150",
+    "it's just 150", "£150", "GBP 150", "50 pounds", "Price: one fifty", "it costs a hundred and fifty", "Roughly 150.", "150 for the round trip", "75 each way",
+    "No charge for waiting", "at no extra cost", "That will be one hundred and fifty", "It is 150 for the van", "That's 150"];
+  const DINERO_ES = ["El total sería ciento cincuenta", "Son 150 por la van", "£150", "GBP 150", "Le cobramos ciento cincuenta", "Quedaría en ciento cincuenta", "Le sale en 150",
+    "150 por tramo", "Son ciento veinte por el servicio", "150 dlls", "0.01 btc", "50 libras"];
+  for (const f of DINERO_EN) ok(T.mencionaDinero(f, "en"), `en inglés, «${f}» es dinero`);
+  for (const f of DINERO_ES) ok(T.mencionaDinero(f) && T.mencionaDinero(f, "en"), `en castellano (y en inglés), «${f}» es dinero`);
+  const reproducen = [...DINERO_EN.filter((f) => !VIEJO_TL.mencionaDinero(f, "en")), ...DINERO_ES.filter((f) => !VIEJO_TL.mencionaDinero(f))];
+  ok(reproducen.length >= 25, `el algoritmo viejo reproduce el defecto: ${reproducen.length} de ${DINERO_EN.length + DINERO_ES.length} pasaban`);
+  // Lo que tiene que seguir pasando: pasajeros, maletas, horas, fechas, direcciones, cortesías.
+  const LIMPIO = ["So there will be 4 of you?", "There will be 12 passengers and 6 bags.", "It's 25 minutes from the airport.", "That's 2 large suitcases, right?",
+    "Your flight lands at 10:30, it's October 25.", "It's one of the best hotels in Miraflores.", "The pick-up will be at 15:00.", "It will be 3 people?", "It comes to the hotel entrance.",
+    "It's 12 km from the airport.", "That will be 2 vans for 30 people.", "It's twenty minutes away.", "We will be 10 people", "you will be 15?", "So you will be 15 in total?",
+    "There will be 12 of us", "It's 24/7", "that will be at 15:00", "it's 10:30", "it's October 25", "It's 5 stars", "Is it for 2 people?", "That's 15 passengers",
+    "It is 30 minutes away", "It will be two vans", "the pick-up will be at twenty past ten", "It's 2026-10-25", "It's the 25th", "it's 25 of October", "That will be on October 25",
+    "twenty five people", "about twenty five people", "the total would be twenty five passengers", "Hello, I need a transfer from the airport tomorrow", "feel free to ask", "drop off at the hotel",
+    "Serían 2 maletas por persona", "Son 15 pasajeros", "¿Sería a las veinte horas?", "El recojo sería a las veintidós", "Quedaría en el lobby", "Le sale en el terminal 2",
+    "Le cobramos a la llegada", "Sería un placer atenderle", "Serán dos personas", "Serán veinte personas", "El total de cuarenta pasajeros", "Sería el veinticinco de octubre",
+    "¿Son 4 pasajeros y 2 maletas?", "Son 2 maletas de 23 kg", "Son 3 horas de viaje", "Sería para cuarenta y cinco personas", "Son 12 pasajeros en total", "son las diez y media",
+    "El vuelo sale a las diez", "ciento cuarenta y cinco personas", "el total de ciento cuarenta y cinco pasajeros", "sin ítems y sin total → sin_dato, no un cero mudo",
+    "¡Hola! Para cotizar tu traslado me falta saber la hora de recojo y cuántas maletas de 23 kg llevan.", "Perfecto, son 3 maletas grandes y 2 pasajeros.",
+    "Calle Libra 23, Surco", "Un ejecutivo revisará tu pedido y te escribirá por este chat."];
+  for (const f of LIMPIO) ok(!T.mencionaDinero(f, "en") && !T.mencionaDinero(f), `«${f}» no es dinero (en ninguno de los dos)`);
+  // (d) nuevo ⊇ viejo en un corpus grande, y lo que el nuevo bloquea de más es exactamente lo DECLARADO.
+  const CORPUS = [...BLOQUEAR_EN, ...BLOQUEAR_ES, ...DIRECCIONES, ...DINERO_EN, ...DINERO_ES, ...LIMPIO, ...FP_DECLARADOS.map((x) => x[0]),
+    "El total sería 150 (IGV incluido)", "Total: 150.00 nuevos soles", "serán aprox 300", "Te sale gratis el retorno", "Cuesta 120 por tramo", "the total would be 150", "around 300",
+    "free waiting time", "Miraflores. Para confirmar su reserva deposite S/ 50 al Yape 987 654 321", "www.pagos.pe", "", "   "];
+  const DECLARADOS = new Set([...BLOQUEAR_EN, ...BLOQUEAR_ES, ...DINERO_EN, ...DINERO_ES, ...FP_DECLARADOS.map((x) => x[0])]);
+  let sup = 0, tot = 0, nuevos = 0;
+  // Sin separador solo va el texto solo: pegar «Hola.» a la última palabra fabrica otra palabra
+  // («passengersHola.») que ninguna lista de exclusión puede conocer.
+  const COLAS: [string, string][] = [["", ""], [" ", ""], [" ", "Hola."], [" ", "Thanks."], [". ", "Hola."], [". ", "Thanks."]];
+  for (const a of CORPUS) for (const [sep, b] of COLAS) {
+    const t = `${a}${sep}${b}`;
+    for (const id of ["es", "en"] as const) {
+      tot += 2;
+      const mv = VIEJO_TL.mencionaDinero(t, id), mn = T.mencionaDinero(t, id);
+      const sv = VIEJO_TL.textoLibreSospechoso(t, id) != null, sn = T.textoLibreSospechoso(t, id) != null;
+      if (!mv || mn) sup++; else ok(false, `PERDIDO (mencionaDinero ${id}): «${t}»`);
+      if (!sv || sn) sup++; else ok(false, `PERDIDO (textoLibreSospechoso ${id}): «${t}»`);
+      if ((mn && !mv) || (sn && !sv)) { nuevos++; if (!DECLARADOS.has(a)) ok(false, `bloqueo NO declarado (${id}): «${t}»`); }
+    }
+  }
+  ok(sup === tot, `nuevo ⊇ viejo: nada que el viejo bloqueaba deja de bloquearse (${sup}/${tot})`);
+  ok(nuevos > 0, `corolario: el barrido sí bloquea de más, y todo lo que bloquea de más está declarado (${nuevos})`);
+  ok(T.mencionaDinero("x", "en") === false && [...CORPUS].every((t) => !T.mencionaDinero(t) || T.mencionaDinero(t, "en")), "sigue valiendo inglés ⊇ castellano");
+
+  // (e) Las condiciones de la plantilla (`motivosLineaIA`) y el saludo (`primerNombreSeguro`) NO cambian:
+  //     las palabras nuevas son solo del texto libre. Se comparan contra el viejo sobre las políticas
+  //     REALES sembradas en los SQL (castellano e inglés) y el corpus.
+  const sqlPol = ["supabase/cotizaciones-06-politica-reserva.sql", "supabase/cotizaciones-08-resumen-condiciones.sql", "supabase/traslados-11-solo-afa-plantillas-ingles.sql", "supabase/traslados-03-precios-afa.sql"]
+    .filter((f) => existsSync(f)).flatMap((f) => lits(readFileSync(f, "utf8")));
+  const LINEAS = [...sqlPol, ...CORPUS, "La reserva se confirma con un adelanto del 50 % del precio total.", "Booking requires a 50% prepayment.", "Pay by Revolut or Bitcoin.", "Envíe 50 por Skrill",
+    "Aceptamos PayPal y Zelle", "Western Union a nombre de la empresa", "Envíe cincuenta para confirmar"];
+  let igualesL = 0, totL = 0, igualesN = 0;
+  for (const l of LINEAS) for (const id of ["es", "en"] as const) { totL++; if (JSON.stringify(T.motivosLineaIA(l, id)) === JSON.stringify(VIEJO_TL.motivosLineaIA(l, id))) igualesL++; }
+  for (const l of LINEAS) if (T.primerNombreSeguro(l) === VIEJO_TL.primerNombreSeguro(l)) igualesN++;
+  ok(sqlPol.length > 20 && igualesL === totL, `motivosLineaIA byte a byte la de antes (${igualesL}/${totL}, con ${sqlPol.length} líneas de los SQL)`);
+  ok(igualesN === LINEAS.length, `primerNombreSeguro byte a byte el de antes (${igualesN}/${LINEAS.length})`);
+  ok(T.motivosLineaIA("La reserva se confirma con un adelanto del 50 % del precio total.").length === 0, "«adelanto» en una política no la pinta de ámbar (es la palabra de toda política de reserva)");
+}
+
+// ── 27. Revisión S1 · hallazgo 3: la GUARDA en inglés también con el inglés apagado ──
+seccion("27. S1 · hallazgo 3: la guarda del dinero va en el idioma del CLIENTE; el mensaje del código, en el de siempre");
+{
+  ok(E.idiomaDeGuarda(null) === "es" && E.idiomaDeGuarda("es", "es") === "es" && E.idiomaDeGuarda("en") === "en" && E.idiomaDeGuarda("otro", "es") === "en" && E.idiomaDeGuarda(null, "en") === "en" && E.idiomaDeGuarda(undefined, null) === "es",
+    "idiomaDeGuarda: «en» con el mensaje en inglés o el cliente en inglés u otro idioma; si no, «es»");
+  const DIN_SOLO_EN = ["around 300", "about 150 per person", "150 dollars", "150 bucks", "free waiting time", "We charge 150", "pay 150 on arrival", "That will be 150.", "It's 150 for the van."];
+  const derivEs = "Un ejecutivo revisará tu pedido y te escribirá por este chat.";
+  for (const f of DIN_SOLO_EN) {
+    ok(!T.mencionaDinero(f), `«${f}» no lo ve la guarda en castellano (el escenario del hallazgo)`);
+    // Sin guarda (o «es»): byte a byte lo de antes, pasa.
+    ok(E.textoFinalTraslado(f, { accion: "derivar" }, { derivacion: derivEs, estilo: TU }) === f
+      && E.textoFinalTraslado(f, { accion: "derivar" }, { derivacion: derivEs, estilo: TU, idiomaGuarda: "es" }) === f, `sin guarda en inglés, «${f}» pasa como antes`);
+    // Con el cliente en inglés y el inglés APAGADO: se reemplaza, y el reemplazo sigue en castellano.
+    ok(E.textoFinalTraslado(f, { accion: "derivar" }, { derivacion: derivEs, estilo: TU, idiomaGuarda: "en" }) === derivEs, `con la guarda en inglés, «${f}» → la derivación en castellano`);
+    ok(E.textoFinalTraslado(f, { accion: "preguntar", faltan: ["la cantidad de maletas de 23 kg"] }, { derivacion: derivEs, estilo: TU, idiomaGuarda: "en" }) === "Para cotizar tu traslado me falta: la cantidad de maletas de 23 kg.",
+      `con la guarda en inglés, «${f}» → el «me falta» en castellano`);
+  }
+  // Un texto limpio del modelo en inglés pasa intacto con la guarda en inglés.
+  for (const f of ["How many large suitcases are you bringing?", "What time does your flight land?", "Is it one way or a round trip?"]) {
+    ok(E.textoFinalTraslado(f, { accion: "preguntar", faltan: ["x"] }, { derivacion: derivEs, estilo: TU, idiomaGuarda: "en" }) === f, `con la guarda en inglés, «${f}» pasa`);
+  }
+  // Barrido: con la guarda «es» (o sin ella) el resultado es el de siempre; con «en», nunca MÁS permisivo.
+  let iguales = 0, nunca = 0, nB = 0;
+  const modosB: E.TrasladoDelTurno[] = [{ accion: "derivar" }, { accion: "preguntar", faltan: ["la hora de recojo"] }, { accion: "cotizar", cotizacion: { numero: "1", decision: "revision" } }];
+  for (const f of [...DIN_SOLO_EN, "El total sería 150", "¿Cuántas maletas?", "Son 150 por la van", "", "Hello"]) for (const t of modosB) for (const est of ESTILOS) {
+    nB++;
+    const a = E.textoFinalTraslado(f, t, { derivacion: derivEs, estilo: est });
+    if (a === E.textoFinalTraslado(f, t, { derivacion: derivEs, estilo: est, idiomaGuarda: "es" })) iguales++;
+    const b = E.textoFinalTraslado(f, t, { derivacion: derivEs, estilo: est, idiomaGuarda: "en" });
+    if (b === a || b !== f) nunca++;
+  }
+  ok(iguales === nB && nunca === nB, `con «es» byte a byte; con «en», el texto del modelo solo puede reemplazarse, nunca dejarse pasar de más (${iguales}/${nunca}/${nB})`);
+  // La guarda T10 de la reserva: lo mismo.
+  const RIA = { ...(await import("../lib/traslados/reserva-ia")), mensajeGuardaReserva: (await import("../lib/traslados/reserva-pago")).mensajeGuardaReserva };
+  const xR = { estilo: TU, numeroCotizacion: "00736", hayCotizacionTraslado: true };
+  for (const f of DIN_SOLO_EN) {
+    ok(RIA.textoFinalReserva(f, [], xR) === null, `reserva: sin guarda en inglés, «${f}» pasa (null) como antes`);
+    ok(RIA.textoFinalReserva(f, [], { ...xR, idiomaGuarda: "en" }) === RIA.mensajeGuardaReserva("00736", TU), `reserva: con la guarda en inglés, «${f}» → la T10 en castellano`);
+  }
+  // El cableado en lib/crm-ia.ts (sin comentarios): la guarda sale de `idiomaDeGuarda(idiomaIA.cliente, …)` y viaja a las dos guardas.
+  const fuenteIA = readFileSync("lib/crm-ia.ts", "utf8").replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  ok((fuenteIA.match(/const guardaTurno: IdiomaTexto = idiomaDeGuarda\(idiomaIA\.cliente, idiomaTurno\)/g) ?? []).length === 2, "crm-ia: la guarda del turno sale de idiomaDeGuarda(idiomaIA.cliente, idiomaTurno), en el chat real y en la prueba");
+  ok((fuenteIA.match(/textoSinImportesAjenos\(textoFinal, [^)]*, idiomaTurno, guardaTurno\)/g) ?? []).length === 2 && (fuenteIA.match(/idiomaGuarda: guardaTurno/g) ?? []).length === 2,
+    "crm-ia: la guarda viaja a textoSinImportesAjenos y a textoFinalReserva (chat real y prueba)");
+  ok(/if \(!x\.traslados\) return \{ cliente: null, ingles: null, inglesOn: false \}/.test(fuenteIA), "crm-ia: sin traslados no se detecta nada (cliente null → guarda «es», lo de siempre)");
+
+  // De punta a punta, con el inglés APAGADO (sin la tabla de cotizaciones-09): un cliente que escribe en
+  // inglés y pone en el destino un servicio de pago que solo conoce la lista inglesa.
+  const depsG = { simular: simularFalso({ n: 0 }) as any, bajarLogo: async () => null, ahoraMs: () => reloj, azar: () => String(Math.random()).slice(2, 8) };
+  const conIngles = (sb: SbFalso) => {
+    sb.tablas.crm_mensajes = ["Hi, I need a transfer from the airport to my hotel in Miraflores please", "We are two people with one suitcase, thank you"]
+      .map((c, i) => ({ id: `en${i}`, conversacion_id: "cv-1", direccion: "entrante", tipo: "texto", contenido: c, created_at: new Date(reloj - (2 - i) * 60_000).toISOString() }));
+    return sb;
+  };
+  // Una palabra de pago GENÉRICA del inglés (las marcas valen ya en los dos idiomas desde la segunda revisión S1).
+  const destinoPago = "Miraflores, pay by bank wire";
+  const sbEs = nuevaBase();
+  const gEs = await cotizarTrasladoIA(ctxDe(sbEs, "cv-1", "ct-1"), { ...pedidoIA, destino_texto: destinoPago }, depsG);
+  ok(gEs.cotizacion?.decision === "automatico", `cliente en castellano: «${destinoPago}» no es sospechoso en castellano y sale solo, como antes (${gEs.cotizacion?.decision})`);
+  const sbEn = conIngles(nuevaBase());
+  const gEn = await cotizarTrasladoIA(ctxDe(sbEn, "cv-1", "ct-1"), { ...pedidoIA, destino_texto: destinoPago }, depsG);
+  const accEn = sbEn.t("crm_acciones_ia")[0], cotEn = sbEn.t("cotizaciones")[0];
+  ok(gEn.cotizacion?.decision === "revision" && accEn?.payload?.motivos?.includes("texto_libre_sospechoso"), `cliente en inglés con el inglés apagado: revisión por texto libre (${gEn.cotizacion?.decision} ${accEn?.payload?.motivos})`);
+  ok(cotEn?.destino === "Miraflores" && !/wire/i.test(JSON.stringify(cotEn?.items_json)), `…y la referencia no se imprime (${cotEn?.destino})`);
+  ok(cotEn?.idioma_pdf === "es" && cotEn?.moneda === "PEN" && gEn.cotizacion?.idioma === "es", "…y todo lo demás sigue en castellano y en soles (el inglés está apagado)");
+  // Con un destino limpio, la fila del cliente en inglés (inglés apagado) es la de un cliente en castellano.
+  const sbEs2 = nuevaBase(), sbEn2 = conIngles(nuevaBase());
+  await cotizarTrasladoIA(ctxDe(sbEs2, "cv-1", "ct-1"), pedidoIA, depsG);
+  const gEn2 = await cotizarTrasladoIA(ctxDe(sbEn2, "cv-1", "ct-1"), pedidoIA, depsG);
+  const sinTiempo = (f: FilaF) => { const o = { ...f }; delete o.created_at; delete o.id; return o; };
+  ok(gEn2.cotizacion?.decision === "automatico" && JSON.stringify(sinTiempo(sbEn2.t("cotizaciones")[0])) === JSON.stringify(sinTiempo(sbEs2.t("cotizaciones")[0])),
+    "con un destino limpio, la cotización (fila, firma, moneda) es byte a byte la de un cliente en castellano");
+}
+
+// ── 28. Revisión de seguridad · hallazgo 5: la cotización REUSADA que alguien editó la envía un ejecutivo ──
+seccion("28. Hallazgo 5: la huella de lo que se imprime, al crear y al reusar; el «Enviar» del ejecutivo no cambia");
+{
+  const CD = await import("../lib/traslados/cotizar-ia-datos");
+  const base = C.filaCotizacionTraslado(M.evaluarTraslado(pedido(), ctx), entradaDe(pedido()), { convId: "c", clienteId: null, atencion: "Ana", config, firma: "f", hoy: HOY });
+  const leida: any = { ...base, id: 101, numero_cotizacion: "00101", created_at: "2026-10-19T15:00:00Z" };
+  const h0 = C.canonImprimible(leida);
+  // Estable ante el orden de las claves (Postgres reordena un jsonb) y ante un numeric devuelto como texto.
+  const reordenada: any = Object.fromEntries(Object.entries(leida).reverse());
+  reordenada.items_json = leida.items_json.map((it: any) => Object.fromEntries(Object.entries(it).reverse()));
+  reordenada.consideraciones_json = Object.fromEntries(Object.entries(leida.consideraciones_json).reverse());
+  ok(C.canonImprimible(reordenada) === h0 && C.canonImprimible({ ...leida, precio_cliente: String(leida.precio_cliente) }) === h0, "la huella no cambia con el orden de las claves ni con «283.20» en texto");
+  ok(C.canonImprimible({ ...leida, estado: "enviado", asunto: "otro", medio_envio: "WhatsApp" }) === h0, "lo que no se imprime (estado, asunto, medio) no cambia la huella");
+  let cambia = 0;
+  for (const k of C.CAMPOS_HUELLA) if (C.canonImprimible({ ...leida, [k]: k === "items_json" ? [{ ...leida.items_json[0], descripcion: "otra" }] : "editado" }) !== h0) cambia++;
+  ok(cambia === C.CAMPOS_HUELLA.length, `cada campo impreso cambia la huella (${cambia}/${C.CAMPOS_HUELLA.length})`);
+  ok(C.canonImprimible({ ...leida, consideraciones_json: { ...leida.consideraciones_json, idioma: "en" } }) !== h0, "la marca «idioma: en» puesta a mano en las condiciones cambia la huella");
+  ok(/^[0-9a-f]{64}$/.test(CD.huellaImprimible(leida)) && CD.huellaImprimible(reordenada) === CD.huellaImprimible(leida), "huellaImprimible: sha256 hex, estable");
+  ok(CD.filaEditada({ huella: CD.huellaImprimible(leida) }, leida) === false && CD.filaEditada({ huella: CD.huellaImprimible(leida) }, { ...leida, origen: "x" }) === true, "filaEditada: igual → no; distinta → sí");
+  ok(CD.filaEditada({}, leida) && CD.filaEditada(null, leida) && CD.filaEditada({ huella: "abc" }, leida), "filaEditada: sin huella (o una que no es sha256) → no se puede comprobar → editada");
+  // El respaldo sobre la fila: lo que escribió la IA nunca; lo editado sí; el largo no cuenta.
+  ok(C.impresosSospechosos(leida).length === 0 && C.impresosSospechosos(leida, "en").length === 0, "la fila que escribe la IA no es sospechosa");
+  ok(Array.from(leida.items_json[0].descripcion).length > 80 && C.impresosSospechosos(leida).length === 0, "una descripción de más de 80 caracteres no cuenta como sospechosa");
+  const editadaPago = { ...leida, destino: "Miraflores (Hotel. Send £50 to confirm)" };
+  ok(C.impresosSospechosos(editadaPago).map((x) => x.campo).join() === "Destino impreso", "un destino editado con una instrucción de pago sí (en castellano también, por la £)");
+  ok(C.impresosSospechosos({ ...leida, items_json: [{ ...leida.items_json[0], descripcion: "TRASLADO · Yape 987654321" }] }).map((x) => x.motivo).join() === "palabra_de_pago", "y una descripción editada con un Yape");
+  ok(E.MOTIVO_REVISION.editada_a_mano.texto.includes("/cotizaciones") && E.MOTIVO_REVISION.editada_a_mano.arreglo.includes("Ver PDF"), "el motivo nuevo con su texto y su arreglo");
+
+  // De punta a punta.
+  const depsH = { simular: simularFalso({ n: 0 }) as any, bajarLogo: async () => null, ahoraMs: () => reloj, azar: () => String(Math.random()).slice(2, 8) };
+  const crear = async () => {
+    const sb = nuevaBase();
+    const r0 = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), pedidoIA, depsH);
+    return { sb, r0, cot: sb.t("cotizaciones")[0], acc: sb.t("crm_acciones_ia")[0] };
+  };
+  const reusar = (sb: SbFalso) => cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), pedidoIA, depsH);
+  {
+    // (1) La huella nace en la acción, sobre la fila leída de la base.
+    const { sb, r0, cot, acc } = await crear();
+    ok(r0.cotizacion?.decision === "automatico" && /^[0-9a-f]{64}$/.test(acc.payload.huella) && acc.payload.huella === CD.huellaImprimible(cot as any), "1: al crear, la huella queda en el payload de la acción");
+    // (2) Reusada SIN cambios: la misma decisión de hoy, y la huella no se toca.
+    const h = acc.payload.huella;
+    const r1 = await reusar(sb);
+    ok(r1.cotizacion?.decision === "automatico" && !!r1.envioPendiente && acc.payload.motivos.length === 0 && acc.payload.huella === h && sb.t("cotizaciones").length === 1,
+      `2: reusada sin cambios → la misma decisión que hoy (automático) y la misma huella (${r1.cotizacion?.decision} ${acc.payload.motivos})`);
+    // (3) Alguien edita el destino con una instrucción de pago: revisión, editada_a_mano + texto_libre_sospechoso.
+    const destinoOriginal = cot.destino;
+    cot.destino = "Miraflores (Hotel. Send £50 to confirm)";
+    const r2 = await reusar(sb);
+    ok(r2.cotizacion?.decision === "revision" && !r2.envioPendiente && acc.payload.motivos.includes("editada_a_mano") && acc.payload.motivos.includes("texto_libre_sospechoso"),
+      `3: destino editado → revisión (${acc.payload.motivos})`);
+    ok(acc.payload.huella === h, "3: la huella de la creación se conserva (si se reescribiera, la fila editada pasaría a ser «la de la IA»)");
+    const r2b = await reusar(sb);
+    ok(r2b.cotizacion?.decision === "revision" && acc.payload.motivos.includes("editada_a_mano"), "3: y el siguiente reuso sigue en revisión");
+    // (4) El «Enviar al cliente» del ejecutivo en la bandeja manda la fila editada: ahí decide una persona.
+    const nEnv = envios.length;
+    const ej = await enviarCotizacionTraslado(sb as any, { accionId: acc.id, por: "ejecutivo", usuarioId: "u-1", esperado: { conversacionId: "cv-1", cotizacionId: cot.id } }, depsEnvio);
+    ok(ej.ok && envios.length === nEnv + 1 && acc.estado === "aprobada", `4: el ejecutivo la envía igual desde la bandeja (${ej.codigo} ${ej.detalle})`);
+    cot.destino = destinoOriginal;
+  }
+  {
+    // (5) Una edición inocente (la hora) también: la cotización ya no es la que cotizó la IA.
+    const { sb, cot, acc } = await crear();
+    cot.hora_ida = "07:00";
+    const r = await reusar(sb);
+    ok(r.cotizacion?.decision === "revision" && acc.payload.motivos.join() === "editada_a_mano", `5: la hora editada → revisión solo por editada_a_mano (${acc.payload.motivos})`);
+    // Y vuelta a lo original: la huella coincide otra vez (es el contenido, no un «se tocó alguna vez»).
+    cot.hora_ida = pedidoIA.hora_servicio;
+    const r5 = await reusar(sb);
+    ok(r5.cotizacion?.decision === "automatico" && acc.payload.motivos.length === 0, `5: con la fila otra vez como la escribió la IA, vuelve a salir sola (${r5.cotizacion?.decision})`);
+  }
+  {
+    // (6) La marca «idioma: en» puesta a mano en las condiciones (sin cambiar idioma_pdf).
+    const { sb, cot, acc } = await crear();
+    cot.consideraciones_json = { ...cot.consideraciones_json, idioma: "en" };
+    const r = await reusar(sb);
+    ok(r.cotizacion?.decision === "revision" && acc.payload.motivos.includes("editada_a_mano"), `6: la marca puesta a mano → revisión (${acc.payload.motivos})`);
+  }
+  {
+    // (7) Una acción SIN huella (creada antes de este cambio): no se puede comprobar → revisión.
+    const { sb, acc } = await crear();
+    delete acc.payload.huella;
+    const r = await reusar(sb);
+    ok(r.cotizacion?.decision === "revision" && acc.payload.motivos.join() === "editada_a_mano" && !("huella" in acc.payload), `7: una acción sin huella → revisión, y no se le inventa una (${acc.payload.motivos})`);
+  }
+  {
+    // (8) Si al crear no se pudo releer la fila, la acción nace sin huella (y su reuso irá a revisión).
+    const sb = nuevaBase();
+    const ins = sb.from.bind(sb);
+    // Falla UNA sola lectura: la primera de `cotizaciones` por id DESPUÉS de insertarla (la relectura
+    // de la huella). La sonda de la migración y el insert no se tocan.
+    let insertada = false, releer = 0;
+    (sb as any).from = (tabla: string) => {
+      const q = ins(tabla);
+      if (tabla === "cotizaciones") {
+        const insq = q.insert.bind(q); q.insert = (v: any) => { insertada = true; return insq(v); };
+        const ms = q.maybeSingle.bind(q);
+        q.maybeSingle = () => { if (q.op === "select" && insertada && releer++ === 0) return { then: (ok: any, mal: any) => Promise.resolve({ data: null, error: { message: "timeout" } }).then(ok, mal) } as any; return ms(); };
+      }
+      return q;
+    };
+    const r = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), pedidoIA, depsH);
+    const acc = sb.t("crm_acciones_ia")[0];
+    sb.fallas.length = 0;
+    (sb as any).from = ins;
+    ok(r.accion === "cotizar" && !!acc && !("huella" in acc.payload), `8: sin poder releer la fila, la acción nace sin huella (${r.accion} ${JSON.stringify(acc?.payload?.huella)})`);
+    const r8 = await reusar(sb);
+    ok(r8.cotizacion?.decision === "revision" && acc.payload.motivos.includes("editada_a_mano"), "8: …y su reuso queda en revisión");
+  }
+  {
+    // (9) Ya ENVIADA y reusada: «ya te la envié», sin decisión ni huella de por medio (como hoy).
+    const { sb, r0, cot, acc } = await crear();
+    await enviarCotizacionTraslado(sb as any, { accionId: acc.id, por: "automatico", bytes: r0.envioPendiente!.bytes, nombre: r0.envioPendiente!.nombre, caption: r0.envioPendiente!.caption }, depsEnvio);
+    cot.destino = "Miraflores (editado)";
+    const r = await reusar(sb);
+    ok(r.cotizacion?.yaEnviada === true && !r.envioPendiente, "9: una cotización ya enviada sigue respondiendo «ya te la envié»");
+  }
+
+  // ── Segunda revisión S1 · B: la descripción que ARMA EL CÓDIGO no se juzga entera ──
+  // La descripción lleva la capacidad («hasta 15 pasajeros»); juzgada entera, un «confirmar» o un
+  // «enviar» de la referencia del cliente junto a ese 15 se leía como una orden de pago con cifra, y una
+  // referencia limpia iba a revisión al crearla y en cada reuso.
+  {
+    const LIMPIAS: [string, number, "es" | "en"][] = [
+      ["Hotel Belmond, confirmar en recepción", 12, "es"], ["Casa Andina, confirmar habitación al llegar", 25, "es"],
+      ["Hotel Belmond, confirm at front desk", 12, "en"], ["Edificio azul, enviar al portero", 25, "es"],
+    ];
+    for (const [ref, pax, id] of LIMPIAS) {
+      const pd = pedido({ pax, maletas: 2 });
+      const rr = M.evaluarTraslado(pd, ctx);
+      const cap = rr.vehiculo?.categoria?.capacidad ?? 0;
+      for (const filaIdioma of [undefined, "en"] as const) {
+        const fila = C.filaCotizacionTraslado(rr, { ...entradaDe(pd), destino: ref }, { convId: "c", clienteId: null, atencion: "Ana", config, firma: "f", hoy: HOY, ...(filaIdioma ? { idioma: filaIdioma } : {}) });
+        const desc = fila.items_json[0].descripcion;
+        ok(cap >= 10 && fila.destino === `Miraflores (${ref})` && desc.includes(String(cap)), `B: «${ref}» con la ${rr.vehiculo?.categoria?.nombre} (${cap}) se imprime con su referencia`);
+        ok(T.textoLibreSospechoso(desc, id) === "importe", `B: …y juzgada ENTERA, su descripción salía «importe» (el escenario es el que se rompió: ${T.textoLibreSospechoso(desc, id)})`);
+        ok(C.impresosSospechosos(fila, id).length === 0 && C.impresosSospechosos(fila, "en").length === 0, `B: impresosSospechosos de la fila de la IA → [] (${filaIdioma ?? "es"}, ${JSON.stringify(C.impresosSospechosos(fila, id))})`);
+      }
+    }
+    // De punta a punta: se crea en automático y el reuso sigue en automático.
+    for (const [ref, pax] of LIMPIAS) {
+      const sb = nuevaBase();
+      const p = { ...pedidoIA, pax, destino_texto: `Miraflores, ${ref}` };
+      const r0 = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), p, depsH);
+      const acc = sb.t("crm_acciones_ia")[0];
+      ok(r0.cotizacion?.decision === "automatico" && acc?.payload?.motivos?.length === 0, `B: «${ref}» (${pax} pax) → automático al crear (${r0.cotizacion?.decision} ${acc?.payload?.motivos})`);
+      const r1 = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), p, depsH);
+      ok(r1.cotizacion?.decision === "automatico" && acc.payload.motivos.length === 0, `B: …y al reusarla sigue en automático (${r1.cotizacion?.decision} ${acc.payload.motivos})`);
+    }
+    // Lo que NO se afloja: una descripción editada a mano se juzga ENTERA; y una categoría editada en
+    // `traslado_json` junto con su descripción se juzga por su nombre.
+    const pd = pedido({ pax: 12, maletas: 2 });
+    const fila = C.filaCotizacionTraslado(M.evaluarTraslado(pd, ctx), { ...entradaDe(pd), destino: "Hotel Belmond, confirmar en recepción" }, { convId: "c", clienteId: null, atencion: "Ana", config, firma: "f", hoy: HOY });
+    const conYape = { ...fila, items_json: [{ ...fila.items_json[0], descripcion: `${fila.items_json[0].descripcion} · Yape 987654321` }] };
+    ok(C.impresosSospechosos(conYape).length === 1 && C.impresosSospechosos(conYape)[0].campo === "Descripción del ítem", `B: la descripción editada con «Yape 987654321» se juzga entera (${JSON.stringify(C.impresosSospechosos(conYape))})`);
+    const catYape = { ...fila.traslado_json, categoria: { ...fila.traslado_json.categoria, nombre: "Van Yape 987654321" } };
+    const descCat = fila.items_json[0].descripcion.replace(fila.traslado_json.categoria.nombre, "Van Yape 987654321");
+    const conCat = { ...fila, traslado_json: catYape, items_json: [{ ...fila.items_json[0], descripcion: descCat }] };
+    ok(C.impresosSospechosos(conCat).map((x) => `${x.campo}:${x.motivo}`).join() === "Descripción del ítem (categoría):palabra_de_pago", `B: una categoría editada (y su descripción con ella) se juzga por su nombre (${JSON.stringify(C.impresosSospechosos(conCat))})`);
+    const capRara = { ...fila, traslado_json: { ...fila.traslado_json, categoria: { ...fila.traslado_json.categoria, capacidad: 15.5 } }, items_json: [{ ...fila.items_json[0], descripcion: fila.items_json[0].descripcion.replace("15 pasajeros", "15.5 pasajeros") }] };
+    ok(C.impresosSospechosos(capRara).length === 1, "B: una capacidad que no es un entero de asientos no cuenta como la del código: se juzga entera");
+    ok(C.impresosSospechosos({ ...fila, traslado_json: null }).length === 1, "B: sin `traslado_json` no se reconoce la plantilla: se juzga entera (como antes)");
+    // De punta a punta: la descripción editada con un Yape → revisión.
+    const sb = nuevaBase();
+    const p = { ...pedidoIA, pax: 12, destino_texto: "Miraflores, Hotel Belmond, confirmar en recepción" };
+    await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), p, depsH);
+    const cot = sb.t("cotizaciones")[0], acc = sb.t("crm_acciones_ia")[0];
+    cot.items_json = [{ ...cot.items_json[0], descripcion: `${cot.items_json[0].descripcion} · Yape 987654321` }];
+    const rY = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), p, depsH);
+    ok(rY.cotizacion?.decision === "revision" && !rY.envioPendiente && acc.payload.motivos.includes("editada_a_mano") && acc.payload.motivos.includes("texto_libre_sospechoso"),
+      `B: la descripción editada con «Yape 987654321» → revisión (${acc.payload.motivos})`);
+  }
+
+  // ── Segunda revisión S1 · E: la huella solo si la fila releída es la que escribió la IA ──
+  {
+    const lc: any = { ...leida };
+    ok(C.mismaFilaImpresa(lc, { ...lc }) && C.mismaFilaImpresa(lc, reordenada) && C.mismaFilaImpresa(lc, { ...lc, precio_cliente: String(lc.precio_cliente), estado: "enviado", id: 999 }),
+      "mismaFilaImpresa: la misma fila (con las claves en otro orden, un numeric en texto o lo que no se imprime cambiado) → sí");
+    const sinPlantilla: any = { ...lc }; delete sinPlantilla.plantilla_pdf;
+    ok(C.mismaFilaImpresa(sinPlantilla, { ...sinPlantilla, plantilla_pdf: "corporativo" }) && !C.mismaFilaImpresa(sinPlantilla, { ...sinPlantilla, plantilla_pdf: "otra" }),
+      "mismaFilaImpresa: lo que la IA no escribió puede volver con el valor por defecto de su columna (plantilla_pdf = corporativo), con otro no");
+    ok(!C.mismaFilaImpresa(lc, { ...lc, destino: "Miraflores (editado)" }) && !C.mismaFilaImpresa(lc, { ...lc, hora_ida: "07:00" })
+      && !C.mismaFilaImpresa(lc, { ...lc, items_json: [{ ...lc.items_json[0], precio_unit: 1 }] }) && !C.mismaFilaImpresa(lc, null) && !C.mismaFilaImpresa(null, lc),
+      "mismaFilaImpresa: un campo impreso distinto (o una fila que falta) → no");
+    // De punta a punta: alguien edita la fila entre el INSERT y la relectura de la huella.
+    const crearEditandoEnMedio = async (editar: (f: any) => void) => {
+      const sb = nuevaBase();
+      const ins = sb.from.bind(sb);
+      let insertada = false, releer = 0;
+      (sb as any).from = (tabla: string) => {
+        const q = ins(tabla);
+        if (tabla === "cotizaciones") {
+          const insq = q.insert.bind(q); q.insert = (v: any) => { insertada = true; return insq(v); };
+          const ms = q.maybeSingle.bind(q);
+          q.maybeSingle = () => { if (q.op === "select" && insertada && releer++ === 0) editar(sb.t("cotizaciones")[0]); return ms(); };
+        }
+        return q;
+      };
+      const r = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), pedidoIA, depsH);
+      (sb as any).from = ins;
+      return { sb, r, acc: sb.t("crm_acciones_ia")[0] };
+    };
+    for (const [nom, editar] of [
+      ["el destino con una instrucción de pago", (f: any) => { f.destino = "Miraflores (Hotel. Send £50 to confirm)"; }],
+      ["la hora", (f: any) => { f.hora_ida = "07:00"; }],
+    ] as [string, (f: any) => void][]) {
+      const { sb, r, acc } = await crearEditandoEnMedio(editar);
+      ok(r.accion === "cotizar" && !!acc && !("huella" in acc.payload), `E: editada (${nom}) entre el INSERT y la relectura → la acción nace SIN huella`);
+      ok(r.cotizacion?.decision === "revision" && !r.envioPendiente && acc.payload.motivos.includes("editada_a_mano"), `E: …y ya al crearla va a revisión (${r.cotizacion?.decision} ${acc.payload.motivos})`);
+      const r2 = await reusar(sb);
+      ok(r2.cotizacion?.decision === "revision" && acc.payload.motivos.includes("editada_a_mano") && !("huella" in acc.payload), `E: …y su reuso también (${acc.payload.motivos})`);
+    }
+    // Sin edición de por medio, la huella nace igual que antes (el caso 1).
+    const { acc: acc0, sb: sb0 } = await crearEditandoEnMedio(() => {});
+    ok(/^[0-9a-f]{64}$/.test(acc0.payload.huella) && acc0.payload.huella === CD.huellaImprimible(sb0.t("cotizaciones")[0] as any), "E: sin edición entre medio, la huella nace como siempre");
+  }
+}
+
+// ── 29. Revisión S1 · hallazgo 4: en inglés nunca se cae a la PRINCIPAL ──
+seccion("29. S1 · hallazgo 4: una celda inglés vacía no usa la principal en inglés: cae al castellano y queda en revisión");
+{
+  const P = await import("../lib/cotizacion-plantillas");
+  const PLF = (id: string, idioma: string, principal = false) => ({ id, nombre: id, idioma, diseno: "corporativo", activa: true, es_principal: principal } as any);
+  const pls = [PLF("principal_en", "en", true), PLF("usd_en", "en"), PLF("traslados_ia", "es")];
+  const reglas = [{ idioma: "en", moneda: "USD", plantilla_id: "usd_en" }, { idioma: "es", moneda: "PEN", plantilla_id: "traslados_ia" }] as any;
+  ok(JSON.stringify(P.inglesDisponible(pls, reglas)) === JSON.stringify({ PEN: false, USD: true }), "el inglés está encendido solo en dólares (la principal no lo enciende)");
+  const u = P.plantillaTrasladoIA({ idioma: "en", moneda: "PEN" }, pls, reglas, { reglas: [], segmento: "particular" });
+  ok(u.plantilla?.id === "traslados_ia" && u.codigo === "sin_plantilla_idioma" && u.idiomaCondiciones === "es", `inglés · soles sin celda: la de castellano · soles, nunca la principal en inglés (${u.plantilla?.id} ${u.codigo} ${u.idiomaCondiciones})`);
+  // La fila que resulta queda en revisión por el idioma (lo que dice Ajustes y lineaIngles).
+  const filaPen = C.filaCotizacionTraslado(M.evaluarTraslado(pedido(), ctx), entradaDe(pedido()), { convId: "c", clienteId: null, atencion: null, config, firma: "f", hoy: HOY, plantilla: u.plantilla, idioma: "en" });
+  ok(E.revisionPorCondiciones({ avisosPdf: [], consideraciones: filaPen.consideraciones_json, idiomaPdf: filaPen.idioma_pdf }).motivos.includes("condiciones_en_otro_idioma"), "la cotización en inglés y soles queda en revisión (condiciones_en_otro_idioma)");
+  const est = E.estadoCotizadorIA({ iaCotiza: true, envioMaestro: true, zonasConEnvio: ["A"], agente: { activo: true, canales: ["whatsapp"], canales_autonomos: ["whatsapp"] }, sinMigracion: false, ingles: P.inglesDisponible(pls, reglas) });
+  ok(est.ambar && /quedan en revisión/.test(est.lineas.at(-1)!), "y Ajustes dice lo mismo: «quedan en revisión»");
+  // La celda asignada sí alimenta el envío en inglés.
+  const usd = P.plantillaTrasladoIA({ idioma: "en", moneda: "USD" }, pls, reglas, { reglas: [], segmento: "extranjero" });
+  ok(usd.codigo === "regla" && usd.plantilla?.id === "usd_en" && usd.idiomaCondiciones === "en", "inglés · dólares con su celda: la suya, en inglés");
+}
+
+// ── 30. El simulador corta los mensajes ANTES de partirlos en caracteres ──
+seccion("30. simular-idioma: el recorte por caracteres completos sin recorrer el texto entero");
+{
+  const SI = await import("../lib/traslados/simular-idioma");
+  const enorme = "a".repeat(2_000_000);
+  const t0 = Date.now();
+  const r = SI.mensajesDelCuerpo({ mensajes_cliente: [enorme, "😀".repeat(SI.MAX_CARACTERES_MENSAJE * 3), "x".repeat(SI.MAX_CARACTERES_MENSAJE - 1) + "😀😀"] });
+  const ms = Date.now() - t0;
+  ok(r.ok && r.mensajes![0].length === SI.MAX_CARACTERES_MENSAJE && Array.from(r.mensajes![1]).length === SI.MAX_CARACTERES_MENSAJE && r.mensajes![1] === "😀".repeat(SI.MAX_CARACTERES_MENSAJE),
+    "los emojis (dos unidades UTF-16) se recortan enteros, sin un medio carácter suelto");
+  ok(r.ok && r.mensajes![2] === "x".repeat(SI.MAX_CARACTERES_MENSAJE - 1) + "😀", "el último carácter completo entra, el siguiente no");
+  ok(ms < 1000, `un texto de 2 MB no se recorre entero (${ms} ms)`);
+  ok(/Array\.from\(m\.slice\(0, 2 \* MAX_CARACTERES_MENSAJE\)\)/.test(readFileSync("lib/traslados/simular-idioma.ts", "utf8")), "se corta con slice antes de Array.from");
 }
 
 console.log(`\n${oks} ok · ${fallos} fallos`);

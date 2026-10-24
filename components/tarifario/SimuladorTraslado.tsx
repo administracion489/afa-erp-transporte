@@ -14,7 +14,16 @@
 // de la regla «Traslado de la IA × segmento» (`respuesta.plantilla`) o, sin ella, las de Ajustes con
 // su porqué (`respuesta.condiciones`: falta el SQL, o ninguna plantilla que la IA pueda dibujar). La
 // frase la compone `condicionesDelSimulador` (traslados-pantalla.ts); una respuesta sin esos campos
-// (un servidor de antes) no dice nada.
+// (un servidor de antes) no dice nada. Desde cotizaciones-09 nombra la CELDA idioma × moneda.
+//
+// EL IDIOMA: «Lo que escribió el cliente» (un mensaje por renglón, el de abajo el más reciente) va al
+// servidor como `mensajes_cliente` (en el orden del chat, como mucho 10 de 500 caracteres), que corre
+// la MISMA detección del chat (`idiomaDelCliente`) con el MISMO interruptor del inglés, y contesta
+// `idioma`. Aquí la detección solo corre para habilitar «Pide soles» mientras se escribe (en
+// castellano desde un número extranjero, pedir soles lo ve un ejecutivo); el servidor solo lo toma
+// con el cliente en inglés u otro idioma y el inglés encendido. La línea del resultado la compone
+// `idiomaDelSimulador`; una respuesta sin `idioma` no dice nada nuevo. El PDF de ejemplo sale en el
+// idioma que contestó el servidor (el mismo cuerpo).
 
 import { useState } from "react";
 import Link from "next/link";
@@ -23,7 +32,10 @@ import { fechaLima } from "@/lib/alertas-horario";
 import { SENALES, sumarDias, type AccionTraslado, type CodigoZona, type SenalComplejidad, type UbicacionZona } from "@/lib/traslados/motor";
 import type { EntradaSimulador, EnvioSimulado, LugarEntrada, LugarUbicado, RespuestaSimulador } from "@/lib/traslados/api";
 import { MOTIVO_REVISION, type CodigoRevision } from "@/lib/traslados/envio-ia";
-import { condicionesDelSimulador, fmtFecha, fmtMoneda, leerEntero } from "./traslados-pantalla";
+import {
+  condicionesDelSimulador, fmtFecha, fmtMoneda, idiomaDeMensajesSimulador, idiomaDelSimulador, leerEntero, MAX_CARACTERES_MENSAJE_SIMULADOR,
+  MAX_MENSAJES_SIMULADOR, mensajesDelSimulador, puedePedirSoles,
+} from "./traslados-pantalla";
 import { AZUL, iCls } from "./traslados-comun";
 import { LugarInput, LUGAR_VACIO, type LugarValor } from "./google-lugar";
 import { abrirPdf } from "./abrir-pdf";
@@ -61,16 +73,22 @@ type Form = {
   maletas: string;
   telefono: string;
   pideDolares: boolean;
+  /** Lo que escribió el cliente, un mensaje por renglón (para probar el idioma). */
+  mensajes: string;
+  pideSoles: boolean;
   paradas: string;
   senales: SenalComplejidad[];
 };
 
 const formVacio = (): Form => ({
   origen: LUGAR_VACIO, destino: LUGAR_VACIO, fecha: manana(), sentido: "ida", fechaRetorno: "",
-  pax: "", maletas: "", telefono: "", pideDolares: false, paradas: "", senales: [],
+  pax: "", maletas: "", telefono: "", pideDolares: false, mensajes: "", pideSoles: false, paradas: "", senales: [],
 });
 
 type RespuestaOk = Extract<RespuestaSimulador, { ok: true }>;
+
+/** Lo que se le manda al servidor: el pedido más los mensajes del cliente (solo si se escribió alguno). */
+type EntradaSimulacion = EntradaSimulador & { mensajes_cliente?: string[] };
 
 /** El `envio` de la respuesta, solo si tiene la forma del contrato; códigos desconocidos se descartan. */
 function envioDe(r: RespuestaOk): EnvioSimulado | null {
@@ -85,7 +103,7 @@ function envioDe(r: RespuestaOk): EnvioSimulado | null {
 type Estado =
   | { tipo: "nada" }
   | { tipo: "simulando" }
-  | { tipo: "ok"; r: RespuestaOk; entrada: EntradaSimulador }
+  | { tipo: "ok"; r: RespuestaOk; entrada: EntradaSimulacion }
   | { tipo: "error"; detalle: string; ambar?: boolean };
 
 const lugarParaApi = (v: LugarValor): LugarEntrada =>
@@ -130,6 +148,11 @@ export default function SimuladorTraslado({ onIrA, iaCotiza, sinMigracionIA }: {
   const lPax = leerEntero(f.pax, 0, 500);
   const lMal = leerEntero(f.maletas, 0, 1000);
   const lPar = leerEntero(f.paradas, 0, 50);
+  // El idioma de lo escrito, con la detección del chat: solo habilita «Pide soles» (decide el servidor).
+  const mensajes = mensajesDelSimulador(f.mensajes);
+  const idiomaLocal = mensajes.length ? idiomaDeMensajesSimulador(mensajes) : null;
+  const solesPermitido = puedePedirSoles(idiomaLocal?.idioma);
+  const renglonesEscritos = f.mensajes.split(/\r\n?|\n/).filter((l) => l.trim()).length;
   // Solo bloquea lo que no se puede ENVIAR (un número mal escrito). Lo que falta (recojo, destino,
   // fecha, pasajeros, maletas) se deja vacío a propósito: el motor contesta qué preguntaría la IA.
   const motivo = lPax.tipo === "error" ? `Pasajeros: ${lPax.detalle}`
@@ -140,7 +163,8 @@ export default function SimuladorTraslado({ onIrA, iaCotiza, sinMigracionIA }: {
   const simular = async () => {
     if (motivo || estado.tipo === "simulando") return;
     setEstado({ tipo: "simulando" });
-    const entrada: EntradaSimulador = {
+    const pideSoles = f.pideSoles && solesPermitido;
+    const entrada: EntradaSimulacion = {
       origen: lugarParaApi(f.origen),
       destino: lugarParaApi(f.destino),
       fecha_servicio: f.fecha || null,
@@ -150,8 +174,12 @@ export default function SimuladorTraslado({ onIrA, iaCotiza, sinMigracionIA }: {
       maletas: lMal.tipo === "ok" ? lMal.valor : null,
       telefono: f.telefono.trim() || null,
       ...(f.pideDolares ? { pide_dolares: true } : {}),
+      // El pedido de soles solo con lo escrito en inglés u otro idioma: el servidor vuelve a detectar
+      // el idioma de `mensajes_cliente` y solo lo toma con el inglés encendido.
+      ...(pideSoles ? { pide_soles: true as const } : {}),
       paradas_intermedias: lPar.tipo === "ok" ? lPar.valor : null,
       senales: f.senales,
+      ...(mensajes.length ? { mensajes_cliente: mensajes } : {}),
     };
     try {
       const res = await fetch("/api/traslados/simular", { method: "POST", headers: await cabecerasErp({ "Content-Type": "application/json" }), body: JSON.stringify(entrada) });
@@ -237,6 +265,28 @@ export default function SimuladorTraslado({ onIrA, iaCotiza, sinMigracionIA }: {
             </label>
             <span className="block text-[10px] text-gray-400">Con la casilla, se cotiza con la lista en dólares aunque el número sea peruano. En el chat, la IA solo lo aplica si el cliente escribió «dólares», «USD» o «$».</span>
           </div>
+          <div className="sm:col-span-2">
+            <label className="block">
+              <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Lo que escribió el cliente (para probar el idioma)</span>
+              <textarea className={iCls("text-xs")} rows={3} value={f.mensajes} onChange={(e) => poner("mensajes", e.target.value)}
+                placeholder={"Un mensaje por renglón; el último es el más reciente.\nEj.: Hello, I need a transfer from the airport tomorrow"} />
+            </label>
+            <span className="block text-[10px] text-gray-400 mt-0.5">
+              El idioma lo detecta el sistema en lo que escribe el cliente (no la IA): con el inglés encendido en Plantillas PDF, un cliente en inglés recibe el PDF y los mensajes en inglés, en dólares aunque su número sea peruano. Se miran los {MAX_MENSAJES_SIMULADOR} últimos renglones, de hasta {MAX_CARACTERES_MENSAJE_SIMULADOR} caracteres. Vacío = castellano, como siempre.
+            </span>
+            {renglonesEscritos > MAX_MENSAJES_SIMULADOR && <span className="block text-[10px] text-amber-700">Hay {renglonesEscritos} renglones: solo se mandan los {MAX_MENSAJES_SIMULADOR} últimos.</span>}
+            {idiomaLocal && <p className="text-[11px] text-gray-600 mt-1">Se lee: {idiomaLocal.detalle}</p>}
+            <label className={`flex items-center gap-2 text-xs min-h-[36px] mt-1 ${solesPermitido ? "text-gray-700 cursor-pointer" : "text-gray-400 cursor-not-allowed"}`}>
+              <input type="checkbox" className="w-4 h-4 accent-[#0b315f]" checked={f.pideSoles && solesPermitido} disabled={!solesPermitido}
+                onChange={(e) => poner("pideSoles", e.target.checked)} />
+              Pide soles
+            </label>
+            <span className="block text-[10px] text-gray-400">
+              {solesPermitido
+                ? "El cliente que escribe en inglés u otro idioma y pide soles recibe la lista en soles (solo con el inglés encendido). En el chat, la IA solo lo aplica si el cliente escribió «soles», «PEN» o «S/». Con soles y dólares a la vez no se toma ninguno."
+                : "Solo se habilita si lo escrito está en inglés u otro idioma: en castellano desde un número extranjero, pedir soles lo ve un ejecutivo."}
+            </span>
+          </div>
           <label className="block">
             <span className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Paradas intermedias</span>
             <input className={iCls("font-mono")} inputMode="numeric" value={f.paradas} onChange={(e) => poner("paradas", e.target.value)} placeholder="0" />
@@ -278,13 +328,14 @@ export default function SimuladorTraslado({ onIrA, iaCotiza, sinMigracionIA }: {
   );
 }
 
-function Resultado({ r: resp, entrada, onIrAZonas, onIrAjustes }: { r: RespuestaOk; entrada: EntradaSimulador; onIrAZonas: () => void; onIrAjustes: () => void }) {
+function Resultado({ r: resp, entrada, onIrAZonas, onIrAjustes }: { r: RespuestaOk; entrada: EntradaSimulacion; onIrAZonas: () => void; onIrAjustes: () => void }) {
   const { resultado: r, lugares } = resp;
   const ins = INSIGNIA[r.accion];
   const p = r.precio;
   const veh = r.vehiculo;
   const envio = r.accion === "cotizar" ? envioDe(resp) : null;
   const condiciones = r.accion === "cotizar" ? condicionesDelSimulador(resp) : null;
+  const idioma = idiomaDelSimulador(resp, entrada);
   const [pdf, setPdf] = useState<{ abriendo: boolean; error: string | null }>({ abriendo: false, error: null });
 
   const verPdf = async () => {
@@ -304,6 +355,14 @@ function Resultado({ r: resp, entrada, onIrAZonas, onIrAjustes }: { r: Respuesta
           <ul className="list-disc pl-5 mt-1 text-sm">{r.faltan.map((x) => <li key={x}>{x}</li>)}</ul>
         )}
       </div>
+
+      {idioma && (
+        <div className={`rounded-xl border px-3 py-2 text-xs space-y-0.5 ${idioma.tono === "azul" ? "border-sky-200 bg-sky-50 text-sky-900" : idioma.tono === "ambar" ? "border-amber-200 bg-amber-50 text-amber-900" : "border-gray-200 bg-gray-50 text-gray-700"}`}>
+          <p className="font-bold break-words">🌐 {idioma.texto}</p>
+          {idioma.detalle && <p className="break-words">{idioma.detalle}</p>}
+          {idioma.enlace && <Link href={idioma.enlace} className="underline font-bold inline-flex items-center min-h-[32px]">Asignar una plantilla en inglés en Plantillas PDF →</Link>}
+        </div>
+      )}
 
       {veh?.categoria && (
         <div>
@@ -371,7 +430,7 @@ function Resultado({ r: resp, entrada, onIrAZonas, onIrAjustes }: { r: Respuesta
             className="px-4 py-2.5 rounded-xl font-bold text-sm border border-[#0b315f] text-[#0b315f] hover:bg-[#eef3f8] disabled:opacity-50 min-h-[44px]">
             {pdf.abriendo ? "Armando el PDF…" : "📄 Ver PDF de ejemplo"}
           </button>
-          <p className="text-[10px] text-gray-400">Es el PDF que recibiría el cliente, con el número «EJEMPLO». No se guarda ni se envía nada.</p>
+          <p className="text-[10px] text-gray-400">Es el PDF que recibiría el cliente{idioma?.ingles ? ", en inglés" : ""}, marcado como ejemplo (número «EJEMPLO»{idioma?.ingles ? "; en inglés la marca dice «SAMPLE»" : ""}). No se guarda ni se envía nada.</p>
           {pdf.error && <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{pdf.error}</p>}
         </div>
       )}

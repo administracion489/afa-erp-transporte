@@ -48,7 +48,7 @@ const SALUDO_INICIAL =
   /^(?:h?ola+|holi+|holis|buen(?:as|os)?(?:\s+(?:dias?|tardes?|noches?))?|saludos|que\s+tal|alo|hello|hi|hey|good\s+(?:morning|afternoon|evening))(?![a-z0-9])/;
 
 /** Las etiquetas con que el historial presenta un archivo o una nota de voz («[El cliente envió…]»). */
-const ETIQUETA_INICIAL = /^\s*\[[^\]]*\]\s*/;
+export const ETIQUETA_INICIAL = /^\s*\[[^\]]*\]\s*/;
 
 /** ¿Este mensaje del cliente abre saludando? «Hola, quiero…», «Buenas noches», «¡Buen día!». */
 export function abreConSaludo(texto: string | null | undefined): boolean {

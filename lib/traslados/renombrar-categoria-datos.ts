@@ -32,9 +32,15 @@ import { planFoto, revisarRenombre, trasladoJsonRenombrado, type CodigoRenombre,
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Sb = SupabaseClient<any, any, any>;
 
-/** Las columnas de la categoría que vuelven a la pantalla (las de `COLS_CATEGORIA` + las de traslados-07). */
+/**
+ * Las columnas de la categoría que vuelven a la pantalla: las de `COLS_CATEGORIA`, las de traslados-07
+ * y la descripción en inglés (traslados-10). Las dos últimas son ACCESORIAS y van en listas APARTE: si
+ * falta la de traslados-10 se suelta solo esa (las fotos se mueven igual), y si la fila devuelta no
+ * la trajera la pantalla dejaría de enseñar (y de guardar) la descripción en inglés de la categoría.
+ */
 const COLS_CATEGORIA = "clave, nombre, capacidad, maletas_bodega, tipo_vehiculo, orden, activo";
 const COLS_CATEGORIA_FOTOS = ["foto_externa_url", "foto_interna_url", "descripcion_cliente"] as const;
+const COLS_CATEGORIA_INGLES = ["descripcion_cliente_en"] as const;
 /** El camino PostgREST a la clave dentro de `cotizaciones.traslado_json`. */
 export const RUTA_CLAVE_COTIZACION = "traslado_json->categoria->>clave";
 /** Cotizaciones por vuelta al reescribir, cuántas a la vez y tope de vueltas (operativos, no medidos). */
@@ -87,11 +93,14 @@ const fallo = (de: string, a: string, status: number, codigo: CodigoResultado, d
 
 const SIN_TABLAS = "Falta correr supabase/traslados-01-tablas.sql: no existen las categorías de traslado.";
 
-/** La categoría con sus fotos (suelta solo las columnas de traslados-07 que el error nombre). */
+/**
+ * La categoría con sus fotos y su descripción en inglés (suelta solo las columnas accesorias que el
+ * error nombre). `accesorias`: las que SÍ existen, para pedirlas de vuelta en el UPDATE.
+ */
 async function leerCategoria(sb: Sb, clave: string): Promise<
-  { ok: true; fila: Record<string, unknown> | null; conFotos: LadoFoto[] } | { ok: false; error: ErrorSupabase }
+  { ok: true; fila: Record<string, unknown> | null; conFotos: LadoFoto[]; accesorias: string[] } | { ok: false; error: ErrorSupabase }
 > {
-  let quedan: string[] = [...COLS_CATEGORIA_FOTOS];
+  let quedan: string[] = [...COLS_CATEGORIA_FOTOS, ...COLS_CATEGORIA_INGLES];
   for (;;) {
     const cols = quedan.length ? `${COLS_CATEGORIA}, ${quedan.join(", ")}` : COLS_CATEGORIA;
     const r = await sb.from("traslado_categorias").select(cols).eq("clave", clave).maybeSingle();
@@ -99,7 +108,7 @@ async function leerCategoria(sb: Sb, clave: string): Promise<
     if (col) { quedan = quedan.filter((c) => c !== col); continue; }
     if (r.error) return { ok: false, error: r.error };
     const conFotos = LADOS_FOTO.filter((l) => quedan.includes(COLUMNA_FOTO[l]));
-    return { ok: true, fila: (r.data as Record<string, unknown> | null) ?? null, conFotos };
+    return { ok: true, fila: (r.data as Record<string, unknown> | null) ?? null, conFotos, accesorias: quedan };
   }
 }
 
@@ -282,7 +291,13 @@ export async function renombrarCategoria(sb: Sb, x: { de: string; aTecleada: str
     const v = cat.fila[col];
     q = v == null ? q.is(col, null) : q.eq(col, v as string);
   }
-  const cols = cat.conFotos.length ? `${COLS_CATEGORIA}, ${COLS_CATEGORIA_FOTOS.join(", ")}` : COLS_CATEGORIA;
+  // De vuelta, las columnas que existen: las de traslados-07 como siempre (todas si están las fotos)
+  // y la descripción en inglés si existe.
+  const devueltas = [
+    ...(cat.conFotos.length ? COLS_CATEGORIA_FOTOS : []),
+    ...COLS_CATEGORIA_INGLES.filter((c) => cat.accesorias.includes(c)),
+  ];
+  const cols = devueltas.length ? `${COLS_CATEGORIA}, ${devueltas.join(", ")}` : COLS_CATEGORIA;
   const up = await q.select(cols);
   if (up.error) {
     await deshacerCopias();
