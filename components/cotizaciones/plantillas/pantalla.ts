@@ -269,7 +269,7 @@ export function estadosTraslado(plantillas: readonly PlantillaFila[], reglasTras
       }
     } else if ((uso.codigo === "regla" || uso.codigo === "principal") && uso.plantilla) {
       tono = "ok";
-      texto = `Usa ${nombrePl(uso.plantilla)} (${uso.codigo === "regla" ? "por esta regla" : celda.idioma === "en" ? "la principal, en inglés" : "la principal"}).`;
+      texto = `Usa ${nombrePl(uso.plantilla)} (${uso.codigo === "regla" ? "por esta regla" : "la principal"}).`;
     } else {
       // regla_inactiva, regla_no_sirve_ia, sin_plantilla o sin_plantilla_idioma: lo explica el motor.
       tono = "ambar";

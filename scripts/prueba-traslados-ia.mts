@@ -2941,7 +2941,10 @@ const VIEJO_TL = (() => {
     "free waiting time", "Miraflores. Para confirmar su reserva deposite S/ 50 al Yape 987 654 321", "www.pagos.pe", "", "   "];
   const DECLARADOS = new Set([...BLOQUEAR_EN, ...BLOQUEAR_ES, ...DINERO_EN, ...DINERO_ES, ...FP_DECLARADOS.map((x) => x[0])]);
   let sup = 0, tot = 0, nuevos = 0;
-  for (const a of CORPUS) for (const sep of ["", " ", ". "]) for (const b of ["", "Hola.", "Thanks."]) {
+  // Sin separador solo va el texto solo: pegar «Hola.» a la última palabra fabrica otra palabra
+  // («passengersHola.») que ninguna lista de exclusión puede conocer.
+  const COLAS: [string, string][] = [["", ""], [" ", ""], [" ", "Hola."], [" ", "Thanks."], [". ", "Hola."], [". ", "Thanks."]];
+  for (const a of CORPUS) for (const [sep, b] of COLAS) {
     const t = `${a}${sep}${b}`;
     for (const id of ["es", "en"] as const) {
       tot += 2;
@@ -3003,7 +3006,7 @@ seccion("27. S1 · hallazgo 3: la guarda del dinero va en el idioma del CLIENTE;
   }
   ok(iguales === nB && nunca === nB, `con «es» byte a byte; con «en», el texto del modelo solo puede reemplazarse, nunca dejarse pasar de más (${iguales}/${nunca}/${nB})`);
   // La guarda T10 de la reserva: lo mismo.
-  const RIA = await import("../lib/traslados/reserva-ia");
+  const RIA = { ...(await import("../lib/traslados/reserva-ia")), mensajeGuardaReserva: (await import("../lib/traslados/reserva-pago")).mensajeGuardaReserva };
   const xR = { estilo: TU, numeroCotizacion: "00736", hayCotizacionTraslado: true };
   for (const f of DIN_SOLO_EN) {
     ok(RIA.textoFinalReserva(f, [], xR) === null, `reserva: sin guarda en inglés, «${f}» pasa (null) como antes`);
@@ -3132,8 +3135,18 @@ seccion("28. Hallazgo 5: la huella de lo que se imprime, al crear y al reusar; e
     // (8) Si al crear no se pudo releer la fila, la acción nace sin huella (y su reuso irá a revisión).
     const sb = nuevaBase();
     const ins = sb.from.bind(sb);
-    let releer = 0;
-    (sb as any).from = (tabla: string) => { const q = ins(tabla); if (tabla === "cotizaciones") { const sel = q.select.bind(q); q.select = (c?: string, o?: any) => { if (q.op === "select" && releer++ === 0) sb.fallas.push({ tabla: "cotizaciones", op: "select", mensaje: "timeout" }); return sel(c, o); }; } return q; };
+    // Falla UNA sola lectura: la primera de `cotizaciones` por id DESPUÉS de insertarla (la relectura
+    // de la huella). La sonda de la migración y el insert no se tocan.
+    let insertada = false, releer = 0;
+    (sb as any).from = (tabla: string) => {
+      const q = ins(tabla);
+      if (tabla === "cotizaciones") {
+        const insq = q.insert.bind(q); q.insert = (v: any) => { insertada = true; return insq(v); };
+        const ms = q.maybeSingle.bind(q);
+        q.maybeSingle = () => { if (q.op === "select" && insertada && releer++ === 0) return { then: (ok: any, mal: any) => Promise.resolve({ data: null, error: { message: "timeout" } }).then(ok, mal) } as any; return ms(); };
+      }
+      return q;
+    };
     const r = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), pedidoIA, depsH);
     const acc = sb.t("crm_acciones_ia")[0];
     sb.fallas.length = 0;
