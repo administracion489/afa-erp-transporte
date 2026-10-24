@@ -22,7 +22,7 @@ import {
   cargarContexto, buscarUnidades, buscarConductores, subirArchivo, ErrorLicitaciones, leerLegajo, subirDocumentoLegajo,
   actualizarFechasLegajo, borrarDocumentoLegajo, subirDocumentoConductor, leerDocsConductor, subirDocUnidad, leerExperiencia,
   guardarExperiencia, desactivarExperiencia, sugerenciaReservas, guardarAnioTercero, leerEmisiones, ultimaEmision,
-  SQL_LICITACIONES, firmaDeBytes, observacionesConEnlaceAnterior, type ResultadoGuardar,
+  SQL_LICITACIONES, firmaDeBytes, observacionesConEnlaceAnterior, leerPersonal, firmasAnteriores, type ResultadoGuardar,
 } from "../lib/licitaciones/datos";
 import { normalizarDoc, docVacio } from "../lib/licitaciones/normalizar";
 import { rutaNueva } from "../lib/licitaciones/archivos";
@@ -74,6 +74,15 @@ class DbFalsa {
 }
 
 type Filtro = { col: string; fn: (f: Fila) => boolean; txt: string };
+/** «doc->a->>b» → la columna «doc». */
+const baseCol = (c: string) => c.split("->")[0];
+/** Resuelve una ruta jsonb de PostgREST; `->>` da texto y el json null es NULL (como en SQL). */
+const valorRuta = (f: Fila, expr: string): unknown => {
+  const partes = expr.split(/->>?/);
+  let v: unknown = f[partes[0]];
+  for (const k of partes.slice(1)) v = v != null && typeof v === "object" ? (v as Fila)[k] : undefined;
+  return v === undefined ? null : v;
+};
 class Consulta {
   op: "select" | "update" | "insert" | "delete" = "select";
   cols: string[] = [];
@@ -98,6 +107,11 @@ class Consulta {
   neq(col: string, v: unknown) { this.filtros.push({ col, fn: (f) => f[col] != null && f[col] !== v, txt: `${col}=neq.${v}` }); return this; }
   in(col: string, vs: unknown[]) { this.filtros.push({ col, fn: (f) => vs.includes(f[col]), txt: `${col}=in.(${vs.join(",")})` }); return this; }
   is(col: string, v: null) { this.filtros.push({ col, fn: (f) => f[col] == v, txt: `${col}=is.${v}` }); return this; }
+  /** Solo `not(col, "is", null)`, con ruta jsonb (`doc->a->>b`) como PostgREST. */
+  not(col: string, op: string, v: null) {
+    if (op !== "is" || v !== null) throw new Error(`not(${op}) no simulado`);
+    this.filtros.push({ col: baseCol(col), fn: (f) => valorRuta(f, col) != null, txt: `${col}=not.is.null` }); return this;
+  }
   or(expr: string) {
     const partes = expr.split(",").map((p) => { const [col, op, ...val] = p.split("."); return { col, op, val: val.join(".") }; });
     this.filtros.push({
@@ -127,11 +141,13 @@ class Consulta {
     for (const k of [...(this.patch ? Object.keys(this.patch) : []), ...this.nuevas.flatMap((n) => Object.keys(n))]) {
       if (!tb.cols.includes(k)) return { data: null, error: { code: "PGRST204", message: `Could not find the '${k}' column of '${t}' in the schema cache` } };
     }
-    for (const c of [...this.cols.filter((c) => c !== "*"), ...this.filtros.map((f) => f.col), ...this.orden.map((o) => o.col)]) {
+    for (const c of [...this.cols.filter((c) => c !== "*").map((c) => baseCol(c.split(":").pop()!)), ...this.filtros.map((f) => f.col), ...this.orden.map((o) => o.col)]) {
       if (!tb.cols.includes(c)) return { data: null, error: { code: "42703", message: `column ${t}.${c} does not exist` } };
     }
     const pasa = (f: Fila) => this.filtros.every((x) => x.fn(f));
-    const proyectar = (f: Fila) => (this.cols.length && !this.cols.includes("*") ? Object.fromEntries(this.cols.map((c) => [c, f[c] ?? null])) : { ...f });
+    const proyectar = (f: Fila) => (this.cols.length && !this.cols.includes("*")
+      ? Object.fromEntries(this.cols.map((c) => { const [alias, expr] = c.includes(":") ? c.split(":") : [c.split("->").pop()!, c]; return [alias, valorRuta(f, expr) ?? null]; }))
+      : { ...f });
     let salida: Fila[];
     if (this.op === "insert") {
       salida = [];
@@ -682,6 +698,61 @@ sec("12. guardarAnioTercero · leerEmisiones · ultimaEmision");
   check(u.ok && u.emision?.version === 2 && (u.emision.foto as unknown as { hoy: string }).hoy === "2026-10-15", "ultimaEmision: la de mayor versión, con foto");
   const u0 = await ultimaEmision(2);
   check(u0.ok && u0.emision === null, "sin emisiones → null");
+}
+
+// ══ 14. Personal, firmas anteriores y entidad emisora ═══════════════════════════
+sec("14. leerPersonal · firmasAnteriores (ruta jsonb, distintas por url) · entidad_emisora");
+{
+  const db = usar(dbBase());
+  db.tablas.personal_administrativo!.filas.push({ id: 23, nombre: "ANA BAJA", dni: "1", cargo: "x", estado: "de_baja" }, { id: 24, nombre: "BETO", dni: null, cargo: null, estado: "activo" });
+  const p = await leerPersonal();
+  check(p.ok && p.filas.map((x) => x.id).join() === "24,22,21" && p.filas.every((x) => "telefono" in x && "email" in x), "activos, por nombre (sin la de baja), con teléfono y correo");
+  db.fallos.push({ tabla: "personal_administrativo", error: { message: "timeout" } });
+  const p2 = await leerPersonal();
+  check(!p2.ok, "lectura fallida → ok:false (nunca lista vacía)");
+}
+{
+  const db = usar(dbBase());
+  const firma = (n: number, mime = "image/png") => ({ id: `f${n}`, url: `${BASE}/storage/v1/object/public/licitaciones/firmas/${n}/${uuid()}.png`, nombre: `firma${n}.png`, mime, bytes: 10, sha256: null, paginas: null, subidoEn: "" });
+  const comun = firma(10);
+  const L = db.tablas.licitaciones!;
+  const fila = (id: number, act: string, rep: Fila) => ({ ...L.filas[1], id, nombre: `L${id}`, actualizado_en: act, doc: { esquema: 1, representante: rep, secciones: [{ id: "s", titulo: "X".repeat(50) }] } });
+  L.filas.push(
+    fila(10, "2026-10-23T00:00:00Z", { personalId: null, nombre: "JORGE", dni: "33334444", cargo: "Gerente", firma: comun }),
+    fila(11, "2026-10-22T00:00:00Z", { personalId: null, nombre: "JORGE", dni: "33334444", cargo: "Gerente", firma: { ...comun, id: "otro" } }),
+    fila(12, "2026-10-21T00:00:00Z", { personalId: 22, nombre: "", dni: "", cargo: "", firma: firma(12) }),
+    fila(13, "2026-10-24T00:00:00Z", { personalId: null, nombre: "SIN FIRMA", dni: "", cargo: "", firma: null }),
+    fila(14, "2026-10-20T00:00:00Z", { personalId: null, nombre: "PDF", dni: "", cargo: "", firma: firma(14, "application/pdf") }),
+    fila(15, "2026-10-24T05:00:00Z", { personalId: null, nombre: "YO", dni: "", cargo: "", firma: firma(15) }),
+  );
+  for (let i = 0; i < 25; i++) L.filas.push(fila(100 + i, `2026-01-${String(1 + (i % 28)).padStart(2, "0")}T00:00:00Z`, { personalId: null, nombre: `V${i}`, dni: "", cargo: "", firma: firma(100 + i) }));
+  db.llamadas = [];
+  const r = await firmasAnteriores(15);
+  const sel = db.llamadas.find((x) => x.tabla === "licitaciones");
+  check(!!sel && sel.cols.join() === "id,nombre,actualizado_en,representante:doc->representante" && !sel.cols.includes("doc"), "lee solo id, nombre, actualizado_en y doc->representante");
+  check(!!sel && sel.filtros.includes("id=neq.15") && sel.filtros.includes("doc->representante->>firma=not.is.null"), "excluye la propia y las que no tienen firma (->>)");
+  if (r.ok) {
+    const ids = r.filas.map((f) => f.licitacionId);
+    check(ids[0] === 10 && !ids.includes(11) && !ids.includes(13) && !ids.includes(15), `más reciente primero, distintas por url, sin la propia ni la vacía (${ids.slice(0, 4)})`);
+    check(!ids.includes(14), "una firma que no es imagen no se ofrece");
+    check(r.filas.length <= 20 && r.filas.length >= 17, `tope de 20 licitaciones (${r.filas.length} firmas distintas)`);
+    const f12 = r.filas.find((f) => f.licitacionId === 12);
+    check(f12?.representante.nombre === "JORGE" && f12.representante.cargo === "Gerente general" && f12.representante.personalId === 22, "con personalId: nombre y cargo derivados del personal");
+    check(r.filas[0].firma.url === comun.url && r.filas[0].firma.mime === "image/png", "firma normalizada (normalizarArchivo)");
+  } else check(false, `firmasAnteriores falló: ${r.error}`);
+  db.tablas.licitaciones = undefined;
+  const r2 = await firmasAnteriores(1);
+  check(!r2.ok && r2.sinMigracion === SQL_LICITACIONES.tablas, "sin la tabla → 01a");
+}
+{
+  const db = usar(dbBase());
+  db.tablas.documentos_tercero!.filas.find((f) => f.id === 60)!.entidad_emisora = "Revisiones Lima";
+  const ctx = await cargarContexto(await licDe(db));
+  check(ctx.unidades["p:1"]?.docs[0].entidad_emisora === "Rimac" && ctx.unidades["t:5"]?.docs.find((d) => d.id === 60)?.entidad_emisora === "Revisiones Lima", "entidad_emisora en los dos orígenes");
+  check(ctx.unidades["t:5"]?.docs.find((d) => d.id === 61)?.entidad_emisora === null, "sin dato → null");
+  const db2 = usar(dbBase()); sinCol(db2, "documentos_vehiculo", "entidad_emisora");
+  const ctx2 = await cargarContexto(await licDe(db2));
+  check(ctx2.lecturas.unidades === "ok" && ctx2.unidades["p:1"]?.docs[0].entidad_emisora === null, "sin la columna: se suelta y queda null");
 }
 
 // ══ 13. Retoques en módulos ajenos ═════════════════════════════════════════════

@@ -243,6 +243,8 @@ export type DocUnidadERP = {
   origen: "documentos_vehiculo" | "documentos_tercero"; id: number; tipo: string; canonico: string | null;
   numero: string | null; fecha_emision: FechaISO | null; fecha_vencimiento: FechaISO | null;
   archivo_url: string | null; deEmpresa: boolean;              // documentos_tercero con vehiculo_id null
+  /** Quien lo emite (aseguradora, centro de inspección…). Opcional: datos.ts lo llena (null si la columna falta). */
+  entidad_emisora?: string | null;
 };
 export type EmpresaTerceroERP = { id: number; razon_social: string; ruc: string | null; autorizacion_mtc: string | null; venc_autorizacion: FechaISO | null; estado: string | null };
 export type UnidadERP = {

@@ -523,9 +523,10 @@ const COLS_VT = ["id", "empresa_id", "placa", "marca", "modelo", "anio", "capaci
 const OPC_VT = ["anio", "foto_externa_url", "foto_interna_url"];
 const COLS_EMP = ["id", "razon_social", "ruc", "autorizacion_mtc", "venc_autorizacion", "estado"];
 const OPC_EMP = ["ruc", "autorizacion_mtc", "venc_autorizacion"];
-const COLS_DV = ["id", "vehiculo_id", "tipo", "numero", "fecha_emision", "fecha_vencimiento", "archivo_url"];
-const COLS_DT = ["id", "empresa_id", "vehiculo_id", "tipo", "numero", "fecha_emision", "fecha_vencimiento", "archivo_url"];
-const OPC_DOC = ["numero", "fecha_emision", "archivo_url"];
+const COLS_DV = ["id", "vehiculo_id", "tipo", "numero", "fecha_emision", "fecha_vencimiento", "entidad_emisora", "archivo_url"];
+const COLS_DT = ["id", "empresa_id", "vehiculo_id", "tipo", "numero", "fecha_emision", "fecha_vencimiento", "entidad_emisora", "archivo_url"];
+/** Las mismas que suelta lib/seguros-datos.ts en esas dos tablas (las escriben /vehiculos y /tercerizadas). */
+const OPC_DOC = ["numero", "fecha_emision", "entidad_emisora", "archivo_url"];
 const VENC_COND = ["examen_medico_venc", "antecedentes_venc", "psicosometrico_venc"] as const;
 const COLS_COND = ["id", "nombre", "dni", "licencia", "categoria_licencia", "vencimiento_licencia", ...VENC_COND, "estado"];
 const COLS_CT = ["id", "empresa_id", "nombre", "dni", "licencia", "categoria_licencia", "vencimiento_licencia", "estado"];
@@ -545,6 +546,7 @@ function aDocUnidad(r: Fila, origen: DocUnidadERP["origen"], deEmpresa: boolean)
   return {
     origen, id: Number(r.id), tipo, canonico: tipoCanonico(tipo)?.canonico ?? null, numero: str(r.numero),
     fecha_emision: fecha(r.fecha_emision), fecha_vencimiento: fecha(r.fecha_vencimiento), archivo_url: str(r.archivo_url), deEmpresa,
+    entidad_emisora: str(r.entidad_emisora),
   };
 }
 function aFilaDoc(r: Fila): FilaDocEmpresa {
@@ -854,6 +856,66 @@ export async function buscarConductores(): Promise<Opciones<OpcionConductor>> {
   }
   opciones.sort(ordenOpciones<OpcionConductor>((x) => x.nombre));
   return { ok: true, opciones, lecturas: { p: p.estado, t: estT }, avisos };
+}
+
+// ══ Personal (contactos y representante legal) ══════════════════════════════════
+/**
+ * El personal administrativo ACTIVO (estaActivo: ni «inactivo» ni de baja), con las mismas columnas que
+ * lee cargarContexto, por nombre e id (orden total). Para elegir contactos y el representante legal.
+ */
+export async function leerPersonal(): Promise<Resultado<{ filas: PersonaERP[] }>> {
+  const db = await cliente();
+  const l = await leer(db, "personal_administrativo", [...COLS_PERS, "estado"], [], (q) => q, [{ col: "nombre" }, { col: "id" }]);
+  if (l.estado !== "ok") return explicar(l.causa, { accion: "leer el personal", tabla: "personal_administrativo", modulo: "Personal administrativo" });
+  return { ok: true, filas: l.filas.filter((r) => estaActivo(str(r.estado))).map(aPersona) };
+}
+
+export type FirmaAnterior = {
+  licitacionId: number; nombre: string; actualizado_en: InstanteISO;
+  /** Con `personalId`, nombre/dni/cargo se DERIVAN de personal_administrativo (vacíos en el doc). */
+  representante: { nombre: string; dni: string; cargo: string; personalId: number | null };
+  firma: ArchivoRef;
+};
+const FIRMAS_ANTERIORES = 20;
+/**
+ * Las firmas del representante de las últimas 20 licitaciones que tienen una (más reciente primero),
+ * distintas por url: para «Reusar la última firma». Lee SOLO id, nombre, actualizado_en y la ruta jsonb
+ * doc->representante (PostgREST), nunca el doc entero. La firma pasa por normalizarArchivo (la misma regla
+ * del doc) y solo vale una imagen (PNG/JPG): es lo que el PDF puede dibujar.
+ */
+export async function firmasAnteriores(excluirId: number): Promise<Resultado<{ filas: FirmaAnterior[] }>> {
+  const db = await cliente();
+  // `->>` (texto): un `firma: null` del doc es NULL en SQL; con `->` sería el json null, que NO es NULL.
+  const { data, error } = await db.from("licitaciones").select("id, nombre, actualizado_en, representante:doc->representante")
+    .neq("id", excluirId).not("doc->representante->>firma", "is", null)
+    .order("actualizado_en", { ascending: false }).order("id", { ascending: false }).limit(FIRMAS_ANTERIORES);
+  if (error) return explicar(error, { accion: "leer las firmas de otras licitaciones", tabla: "licitaciones", sql: SQL_LICITACIONES.tablas });
+  const vistas = new Set<string>();
+  const filas: FirmaAnterior[] = [];
+  for (const r of (data ?? []) as Fila[]) {
+    const rep = esObjeto(r.representante) ? r.representante : {};
+    const firma = aArchivoRef(rep.firma);
+    if (!firma || (firma.mime !== "image/png" && firma.mime !== "image/jpeg") || vistas.has(firma.url)) continue;
+    vistas.add(firma.url);
+    filas.push({
+      licitacionId: Number(r.id), nombre: String(r.nombre ?? ""), actualizado_en: instante(r.actualizado_en),
+      representante: { nombre: textoCorto(rep.nombre, 200), dni: textoCorto(rep.dni, 20), cargo: textoCorto(rep.cargo, 200), personalId: enteroEn(rep.personalId, 1, Number.MAX_SAFE_INTEGER) },
+      firma,
+    });
+  }
+  // Con personalId el doc no guarda nombre/dni/cargo: se derivan (best-effort; sin lectura quedan vacíos).
+  const ids = enteros(filas.filter((f) => f.representante.personalId != null && !f.representante.nombre).map((f) => f.representante.personalId));
+  if (ids.length) {
+    const p = await leerPorIds(db, "personal_administrativo", COLS_PERS, [], "id", ids);
+    if (p.estado === "ok") {
+      const m = new Map(p.filas.map((x) => [Number(x.id), aPersona(x)]));
+      for (const f of filas) {
+        const per = f.representante.personalId != null ? m.get(f.representante.personalId) : undefined;
+        if (per && !f.representante.nombre) f.representante = { ...f.representante, nombre: per.nombre, dni: f.representante.dni || (per.dni ?? ""), cargo: f.representante.cargo || (per.cargo ?? "") };
+      }
+    }
+  }
+  return { ok: true, filas };
 }
 
 // ══ Archivos ═════════════════════════════════════════════════════════════════
