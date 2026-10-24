@@ -207,6 +207,10 @@ export type EscaneoTexto = {
   autorizaciones: { lugar: LugarTexto; token: string }[];
 };
 
+const NOMBRE_BLOQUE: Record<string, string> = {
+  parrafo: "párrafo", nota: "nota", subtitulo: "subtítulo", vinetas: "viñetas", tabla: "tabla", imagen: "pie de imagen", auto: "tabla automática", salto_pagina: "salto de página",
+};
+
 /** Los textos que se imprimen, con dónde están. */
 export function textosImpresos(doc: DocLicitacion): { lugar: LugarTexto; texto: string }[] {
   const out: { lugar: LugarTexto; texto: string }[] = [];
@@ -222,12 +226,14 @@ export function textosImpresos(doc: DocLicitacion): { lugar: LugarTexto; texto: 
   if (k.activa) add(L("carta", "carta", "Carta de presentación"), k.lugarFecha, k.destinatario, k.atencion, k.referencia, k.cuerpo, k.despedida);
   if (doc.glosario.activo) for (const e of doc.glosario.entradas) add(L("glosario", e.id, `Glosario · ${e.termino || "término"}`), e.termino, e.definicion);
   let hayMatriz = false, hayAbsolucion = false, hayCuadro = false;
+  let nSec = 0;
   for (const s of doc.secciones) {
     if (!s.activa) continue;
-    const rot = s.titulo || "Sección sin título";
+    nSec++;
+    const rot = `Sección ${nSec} · ${s.titulo || "sin título"}`;
     add(L("seccion", s.id, rot), s.titulo);
-    for (const b of s.bloques) {
-      const lb = (auto = false) => L("bloque", b.id, `${rot} · ${b.tipo === "auto" ? "tabla automática" : b.tipo}`, auto);
+    for (const [k, b] of s.bloques.entries()) {
+      const lb = (auto = false) => L("bloque", b.id, `${rot} · ${NOMBRE_BLOQUE[b.tipo] ?? "bloque"} ${k + 1}`, auto);
       switch (b.tipo) {
         case "parrafo": case "nota": add(lb(), b.texto); break;
         case "subtitulo": add(lb(), b.texto); break;

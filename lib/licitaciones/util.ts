@@ -144,3 +144,9 @@ export function fechaLarga(f: string | null | undefined): string {
   const [a, m, d] = s.split("-").map(Number);
   return `${d} de ${MESES_LARGOS[m - 1]} de ${a}`;
 }
+
+/** «a», «a y b», «a, b y c». */
+export function listaY(xs: readonly string[]): string {
+  if (xs.length <= 1) return xs[0] ?? "";
+  return `${xs.slice(0, -1).join(", ")} y ${xs[xs.length - 1]}`;
+}

@@ -36,7 +36,7 @@ import {
   type FechaISO, type FilaEmision, type FuenteContexto, type Gravedad, type Hallazgo, type Licitacion, type Paso,
   type Regla, type Revision, type RevisionArchivo, type SujetoHallazgo,
 } from "./tipos";
-import { fechaDMY, fechaONull, diasISO } from "./util";
+import { fechaDMY, fechaONull, diasISO, listaY } from "./util";
 
 const P = (paso: Paso, ancla: string | null = null): DondeSeCorrige => ({ paso, ancla });
 const R = (ruta: string, etiqueta: string): DondeSeCorrige => ({ ruta, etiqueta });
@@ -289,13 +289,13 @@ export function revisarLicitacion(lic: Licitacion, ctx: ContextoLicitacion, arch
   if (leida("perfil")) {
     const emp = empresaConDefectos(perfil);
     const faltan = [...(emp.sinConfigurar ? ["Nombre de la empresa"] : []), ...emp.faltan.filter((x) => !(emp.sinConfigurar && x === "Nombre de la empresa"))];
-    if (!perfil || faltan.length) add("perfil_incompleto", LIC("Perfil de la empresa", "perfil"), `Falta en el perfil: ${faltan.join(", ") || "todo"}.`);
+    if (!perfil || faltan.length) add("perfil_incompleto", LIC("Perfil de la empresa", "perfil"), `Falta en el perfil: ${listaY(faltan) || "todo"}.`);
   }
   const rep = representanteDe(doc, ctx);
   if (!(doc.representante.personalId != null && !leida("personal"))) {
-    const faltan = [!rep.nombre && "nombre", !rep.dni && "DNI", !rep.cargo && "cargo"].filter(Boolean);
+    const faltan = [!rep.nombre && "nombre", !rep.dni && "DNI", !rep.cargo && "cargo"].filter((x): x is string => !!x);
     if (rep.personalNoEncontrado) add("representante_incompleto", LIC("Representante legal", "representante"), "La persona elegida como representante ya no está en el personal administrativo.");
-    else if (faltan.length) add("representante_incompleto", LIC("Representante legal", "representante"), `Falta ${faltan.join(", ")} del representante legal.`);
+    else if (faltan.length) add("representante_incompleto", LIC("Representante legal", "representante"), `Falta ${listaY(faltan)} del representante legal.`);
   }
   const necesitaFirma = (doc.carta.activa && doc.carta.conFirma) || (doc.cierre.activo && doc.cierre.conFirma) || itemsIncluidos.some(({ i }) => i.fuente.tipo === "cuadro_experiencia");
   if (necesitaFirma && !doc.representante.firma) add("firma_falta", LIC("Firma del representante", "firma"), "La carta, el cierre o el cuadro de experiencia van firmados y no hay imagen de la firma.");
