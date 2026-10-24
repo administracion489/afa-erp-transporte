@@ -27,6 +27,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { aMonedaCot, normalizarMoneda, revisarTipoCambio, simboloMoneda, type Moneda } from "./cotizacion-moneda";
+import { canonico } from "./json-canonico";
 
 export type Idioma = "es" | "en";
 export const normalizarIdioma = (v: unknown): Idioma => (String(v ?? "").toLowerCase().startsWith("en") ? "en" : "es");
@@ -397,15 +398,9 @@ export function juzgarConfirmacion(e: EntradaConfirmacion): JuicioConfirmacion {
 
 // ── Versiones ────────────────────────────────────────────────────────────────
 
-/** JSON con las claves ordenadas: la misma foto da siempre la misma cadena. */
-export function canonico(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(canonico).join(",")}]`;
-  if (v && typeof v === "object") {
-    const o = v as Record<string, unknown>;
-    return `{${Object.keys(o).sort().filter((k) => o[k] !== undefined).map((k) => `${JSON.stringify(k)}:${canonico(o[k])}`).join(",")}}`;
-  }
-  return JSON.stringify(v ?? null);
-}
+/** JSON con las claves ordenadas: la misma foto da siempre la misma cadena. Vive en lib/json-canonico.ts
+ *  (lo comparte la emisión de licitaciones); se re-exporta para no mover a ningún llamador. */
+export { canonico };
 
 export type CodigoCambio = "cliente" | "horario" | "ruta" | "servicio" | "vehiculo" | "conductor" | "importe" | "pago" | "indicaciones";
 export const ETIQUETA_CAMBIO: Record<CodigoCambio, string> = {

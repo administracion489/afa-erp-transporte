@@ -24,7 +24,10 @@
 // objeto, no un enlace público. Igual que los demás, nunca lleva getPublicUrl — las fotos de
 // marcación traen rostro y ubicación, y los documentos de ausencia son descansos médicos y
 // licencias. Quien lo pinta firma la ruta con createSignedUrl (bucket "rrhh", path guardado).
-export const BUCKETS_PRIVADOS = ["documentos", "pasajeros-fotos", "radar-media", "rrhh", "crm-media"] as const;
+// `licitaciones` NACE privado (supabase/licitaciones-03-bucket.sql): bases de licitaciones, firmas del
+// representante y las copias emitidas de cada propuesta. Guarda el enlace público como identificador,
+// igual que `documentos`, y solo se puede INSERTAR (nunca sobrescribir): lo emitido no se reescribe.
+export const BUCKETS_PRIVADOS = ["documentos", "pasajeros-fotos", "radar-media", "rrhh", "crm-media", "licitaciones"] as const;
 export type BucketPrivado = (typeof BUCKETS_PRIVADOS)[number];
 export type ObjetoPrivado = { bucket: BucketPrivado; ruta: string };
 
