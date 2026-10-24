@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { empresaConDefectos, monedaDeCuenta, type CuentaBancaria } from "@/lib/empresa-perfil";
+import { columnaFaltante, faltaAlguna } from "@/lib/columna-faltante";
 
 type EmpresaPerfil = {
   id: number;
@@ -26,6 +27,9 @@ type EmpresaPerfil = {
    * imprime. Heredar el de otra empresa sería una afirmación legal falsa en un papel firmado.
    */
   autorizacion_mtc: string | null;
+  /** Fecha de constitución (Ficha RUC / partida registral): con ella Licitaciones juzga la
+   *  experiencia «desde la constitución». Es pública, por eso puede vivir aquí. Sin dato no se juzga. */
+  fecha_constitucion?: string | null;
   /** Cuentas donde cobra la empresa. Se imprimen en la cotización; vacío = no se imprime. */
   cuentas_bancarias: CuentaBancaria[] | null;
   logo_url: string | null;
@@ -38,6 +42,14 @@ type EmpresaPerfil = {
 };
 
 const REGIMENES = ["General", "RMT", "RER", "RUS"];
+
+const OPCIONALES_PERFIL = ["autorizacion_mtc", "cuentas_bancarias", "fecha_constitucion"] as const;
+type ColumnaOpcionalPerfil = (typeof OPCIONALES_PERFIL)[number];
+const ETIQUETA_OPCIONAL_PERFIL: Record<ColumnaOpcionalPerfil, { que: string; sql: string }> = {
+  autorizacion_mtc: { que: "la autorización de transporte", sql: "empresa-01-autorizacion-transporte.sql" },
+  cuentas_bancarias: { que: "las cuentas bancarias", sql: "empresa-02-cuentas-bancarias.sql" },
+  fecha_constitucion: { que: "la fecha de constitución", sql: "licitaciones-04-columnas-accesorias.sql" },
+};
 const MONEDAS = [
   { value: "PEN", label: "PEN — Sol Peruano (S/)" },
   { value: "USD", label: "USD — Dólar Americano ($)" },
@@ -64,6 +76,7 @@ const PERFIL_VACIO: EmpresaPerfil = {
   web: "",
   slogan: "",
   autorizacion_mtc: "",
+  fecha_constitucion: null,
   cuentas_bancarias: [],
   logo_url: null,
   logo_claro_url: null,
@@ -484,6 +497,7 @@ export default function PerfilEmpresaPage() {
         web: perfil.web || null,
         slogan: perfil.slogan || null,
         autorizacion_mtc: perfil.autorizacion_mtc || null,
+        fecha_constitucion: perfil.fecha_constitucion || null,
         // Se manda SIEMPRE, incluso vacío: borrar la última cuenta tiene que poder borrarla.
         // La moneda solo se escribe si se declaró: una cuenta «sin declarar» conserva su forma de siempre.
         cuentas_bancarias: (perfil.cuentas_bancarias || []).filter(c => (c.banco || "").trim()).map(c => {
@@ -498,21 +512,28 @@ export default function PerfilEmpresaPage() {
         updated_at: new Date().toISOString(),
     };
 
-    let { error } = await supabase.from("empresa_perfil").upsert(fila, { onConflict: "id" });
-    // `autorizacion_mtc` es de una migración accesoria. Sin ella el resto del perfil tiene que
-    // poder guardarse igual, y se DICE qué no se guardó: un dato que parece guardarse y no llega
-    // al papel es peor que un error a la cara.
-    let faltaMtc = false;
-    if (error && (error.code === "PGRST204" || /autorizacion_mtc|cuentas_bancarias/i.test(error.message || ""))) {
-      faltaMtc = true;
-      const { autorizacion_mtc: _o1, cuentas_bancarias: _o2, ...resto } = fila;
-      ({ error } = await supabase.from("empresa_perfil").upsert(resto, { onConflict: "id" }));
+    // Tres columnas son de migraciones accesorias. Sin ellas el resto del perfil tiene que poder
+    // guardarse igual, y se DICE qué no se guardó: un dato que parece guardarse y no llega al papel
+    // es peor que un error a la cara. Se suelta SOLO la columna que el error nombra (columna-faltante).
+    let enviar: Record<string, unknown> = fila;
+    const sueltas: ColumnaOpcionalPerfil[] = [];
+    let { error } = await supabase.from("empresa_perfil").upsert(enviar, { onConflict: "id" });
+    for (let i = 0; error && i < OPCIONALES_PERFIL.length; i++) {
+      const quedan = OPCIONALES_PERFIL.filter(c => !sueltas.includes(c));
+      const nombrada = faltaAlguna(error, quedan);
+      // Un PGRST204 que no nombra la columna: se sueltan todas las accesorias que queden, una vez.
+      const soltar = nombrada ? [nombrada] : (sueltas.length === 0 && columnaFaltante(error) === "" ? quedan : []);
+      if (!soltar.length) break;
+      sueltas.push(...soltar);
+      enviar = Object.fromEntries(Object.entries(enviar).filter(([k]) => !soltar.includes(k as ColumnaOpcionalPerfil)));
+      ({ error } = await supabase.from("empresa_perfil").upsert(enviar, { onConflict: "id" }));
     }
     setGuardando(false);
     if (error) {
       mostrarToast("Error al guardar: " + error.message, "error");
-    } else if (faltaMtc) {
-      mostrarToast("Guardado ✓ — la autorización de transporte y las cuentas bancarias NO: falta correr supabase/empresa-01-autorizacion-transporte.sql y empresa-02-cuentas-bancarias.sql", "error");
+    } else if (sueltas.length) {
+      const que = sueltas.map(c => `${ETIQUETA_OPCIONAL_PERFIL[c].que} (falta supabase/${ETIQUETA_OPCIONAL_PERFIL[c].sql})`).join("; ");
+      mostrarToast(`Guardado ✓ — pero NO se guardó: ${que}`, "error");
     } else {
       mostrarToast("Cambios guardados correctamente");
       cargar();
@@ -763,6 +784,22 @@ export default function PerfilEmpresaPage() {
                 placeholder="R.D. N° 0000-0000-MTC-15"
                 value={perfil.autorizacion_mtc || ""}
                 onChange={campo("autorizacion_mtc")}
+                onFocus={(e) => (e.target.style.borderColor = "#0b315f")}
+                onBlur={(e) => (e.target.style.borderColor = "#e5e7eb")}
+              />
+            </CampoForm>
+
+            {/* La usa Licitaciones para juzgar «N años de experiencia desde la constitución».
+                Es un dato público (Ficha RUC, SUNARP). Vacío: ese requisito no se puede juzgar. */}
+            <CampoForm
+              label="Fecha de constitución"
+              hint="La de la Ficha RUC o la partida registral. Licitaciones la usa para los años de experiencia «desde la constitución»."
+            >
+              <input
+                type="date"
+                style={inputStyle}
+                value={perfil.fecha_constitucion || ""}
+                onChange={(e) => setPerfil((p) => ({ ...p, fecha_constitucion: e.target.value || null }))}
                 onFocus={(e) => (e.target.style.borderColor = "#0b315f")}
                 onBlur={(e) => (e.target.style.borderColor = "#e5e7eb")}
               />

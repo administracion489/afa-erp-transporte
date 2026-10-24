@@ -5,9 +5,10 @@ import { supabase } from "@/lib/supabase";
 import { paginarFilas } from "@/lib/huella";
 import OdometroTerceroModal from "./_components/OdometroTerceroModal";
 import AvisoFichaCombustible from "@/components/flota/AvisoFichaCombustible";
-import { FAMILIAS_TANQUE, parseCapacidadTanque as parseCapTanqueT, capacidadTanqueAForm as capTanqueTAForm, faltaColumnaTanque } from "@/lib/combustible-tipos";
+import { FAMILIAS_TANQUE, parseCapacidadTanque as parseCapTanqueT, capacidadTanqueAForm as capTanqueTAForm } from "@/lib/combustible-tipos";
 import { DISTRITOS_LIMA, distanciaDistritos, etiquetaDistancia } from "@/lib/distritos-lima";
-import { ambitoTipoDoc, docSinVencimiento, etiquetaTipoDoc } from "@/lib/documentos-estado";
+import { ambitoTipoDoc, docSinVencimiento, etiquetaTipoDoc, fechaLima } from "@/lib/documentos-estado";
+import { faltaAlguna } from "@/lib/columna-faltante";
 import {
   AUTORIDADES, REGIONES_PERU, avisosAutorizacion, configAutoridad, etiquetaAutorizacion,
   type Autoridad,
@@ -51,6 +52,9 @@ type VehiculoTercero = {
    *  `radar-ia-combustible-multifoto.sql` y esta pantalla no tenía dónde llenarla. */
   capacidad_tanque?: Record<string, number> | null;
   direccion_cochera?: string | null; distrito_cochera?: string | null; // override — si es null, usa el de la empresa
+  /** Año de fabricación. Columna de supabase/licitaciones-04-columnas-accesorias.sql: `undefined` = la
+   *  columna no existe (no se corrió el SQL), `null` = existe y está vacía. */
+  anio?: number | null;
 };
 
 type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string | null; tipo_combustible_1?: string | null };
@@ -331,7 +335,30 @@ const FORM_EMP = {
   direccion_fiscal: "", distrito_fiscal: "",
   direccion_cochera: "", distrito_cochera: "",
 };
-const FORM_VEH = { placa: "", categoria: "BUS", marca: "", modelo: "", capacidad: "", estado: "disponible", foto_externa_url: "", foto_interna_url: "", descripcion_unidad: "", tipo_vehiculo_costeo: "", distrito_cochera: "" };
+const FORM_VEH = { placa: "", categoria: "BUS", marca: "", modelo: "", capacidad: "", estado: "disponible", foto_externa_url: "", foto_interna_url: "", descripcion_unidad: "", tipo_vehiculo_costeo: "", distrito_cochera: "", anio: "" };
+
+// Las columnas de `vehiculos_tercero` que vienen de migraciones accesorias (el deploy no las corre).
+// Van SIEMPRE en el payload —también en null, para poder BORRAR un dato mal puesto— y si la columna
+// no existe se reintenta sin la que el error NOMBRA, diciéndolo con el SQL que falta.
+const COLS_OPCIONALES_VEH = ["capacidad_tanque", "anio"] as const;
+const SQL_COL_VEH: Record<(typeof COLS_OPCIONALES_VEH)[number], { que: string; sql: string }> = {
+  capacidad_tanque: { que: "la capacidad de tanque", sql: "supabase/radar-ia-combustible-multifoto.sql" },
+  anio: { que: "el año de fabricación", sql: "supabase/licitaciones-04-columnas-accesorias.sql" },
+};
+const ANIO_MIN_VEH = 1950;
+
+/** Año de fabricación tecleado → número, null (vacío) o un error que nombra el rango. El tope es el año
+ *  SIGUIENTE en Lima (un modelo del año que viene ya se vende). */
+function leerAnioVeh(txt: string): { ok: true; valor: number | null } | { ok: false; error: string } {
+  const t = txt.trim();
+  if (!t) return { ok: true, valor: null };
+  const max = Number(fechaLima().slice(0, 4)) + 1;
+  const n = Number(t);
+  if (!Number.isInteger(n) || n < ANIO_MIN_VEH || n > max) {
+    return { ok: false, error: `El año de fabricación tiene que ser un año entre ${ANIO_MIN_VEH} y ${max}.` };
+  }
+  return { ok: true, valor: n };
+}
 const FORM_COND = { nombre: "", dni: "", licencia: "", categoria_licencia: "A-IIb", vencimiento_licencia: "", telefono: "", email: "", estado: "disponible", pin_acceso: "", activo_app: false };
 const FORM_DOC = { vehiculo_id: "", tipo: "SOAT", numero: "", fecha_vencimiento: "", entidad_emisora: "", archivo_url: "", observaciones: "" };
 
@@ -364,6 +391,9 @@ export default function EmpresasTercerizadasPage() {
   // esta pantalla no tenía dónde llenarla: el control de «esta carga excede el tanque» caía
   // siempre al estimado por categoría y no había forma de corregirlo desde ningún sitio.
   const [capTanqueT, setCapTanqueT] = useState<Record<string, string>>({});
+  // ¿Existe `vehiculos_tercero.anio`? (licitaciones-04-columnas-accesorias.sql). null = todavía no se
+  // sabe; se deduce de la primera unidad leída con select("*") o del error al guardar.
+  const [colAnioVeh, setColAnioVeh] = useState<boolean | null>(null);
   const [editCondId,  setEditCondId]  = useState<number | null>(null);
   const [editDocId,   setEditDocId]   = useState<number | null>(null);
   const [formEmp,  setFormEmp]  = useState(FORM_EMP);
@@ -548,6 +578,8 @@ export default function EmpresasTercerizadasPage() {
       supabase.from("documentos_tercero").select("*").eq("empresa_id", id).order("fecha_vencimiento"),
     ]);
     const vehs = (vRes.data || []) as VehiculoTercero[];
+    // select("*") trae la columna aunque esté vacía: si la fila no la tiene, falta el SQL.
+    if (vehs.length > 0) setColAnioVeh("anio" in vehs[0]);
     // Lecturas sospechosas acotadas a las unidades de ESTA empresa, en lotes: .in() acota
     // QUÉ filas, no CUÁNTAS devuelve PostgREST.
     const sosp: Record<number, number> = {};
@@ -927,8 +959,10 @@ export default function EmpresasTercerizadasPage() {
 
   const guardarVehiculo = async () => {
     if (!formVeh.placa.trim() || !empresaSel) { alert("Placa obligatoria"); return; }
+    const anio = leerAnioVeh(formVeh.anio);
+    if (!anio.ok) { alert(anio.error); return; }
     setGuardando(true);
-    const payload = {
+    const payload: Record<string, unknown> = {
       empresa_id: empresaSel,
       placa: formVeh.placa.trim().toUpperCase(),
       categoria: formVeh.categoria || null,
@@ -942,19 +976,33 @@ export default function EmpresasTercerizadasPage() {
       tipo_vehiculo_costeo: formVeh.tipo_vehiculo_costeo || null,
       distrito_cochera: formVeh.distrito_cochera || null,
       capacidad_tanque: parseCapTanqueT(capTanqueT),
+      anio: anio.valor,
     };
-    // Mismo patrón que /vehiculos: la columna va siempre (para poder VACIARLA) y si la
-    // migración accesoria no se corrió se reintenta sin ella, diciéndolo.
+    // Mismo patrón que /vehiculos: las columnas accesorias van siempre (para poder VACIARLAS) y si
+    // la migración no se corrió se reintenta sin la que el error nombra, diciéndolo.
     const escribir = (datos: Record<string, unknown>) => editVehId
       ? supabase.from("vehiculos_tercero").update(datos).eq("id", editVehId)
       : supabase.from("vehiculos_tercero").insert(datos);
-    let { error } = await escribir(payload);
-    if (error && faltaColumnaTanque(error)) {
-      const { capacidad_tanque: _omitida, ...sinTanque } = payload;
-      ({ error } = await escribir(sinTanque));
-      if (!error) alert("Se guardó, pero la capacidad de tanque no: falta correr supabase/radar-ia-combustible-multifoto.sql.");
+    let datos = payload;
+    let { error } = await escribir(datos);
+    const soltadas: (typeof COLS_OPCIONALES_VEH)[number][] = [];
+    while (error) {
+      const col = faltaAlguna(error, COLS_OPCIONALES_VEH);
+      if (!col || soltadas.includes(col)) break;
+      const { [col]: _omitida, ...resto } = datos;
+      datos = resto;
+      soltadas.push(col);
+      ({ error } = await escribir(datos));
     }
+    if (soltadas.includes("anio")) setColAnioVeh(false);
+    else if (!error) setColAnioVeh(true);
     if (error) { alert(error.message); setGuardando(false); return; }
+    // El año vacío no se pierde: solo se avisa si se había escrito uno (la falta del SQL ya la dice
+    // el formulario en ámbar). La capacidad de tanque avisa siempre, como antes.
+    const perdidas = soltadas.filter(c => c !== "anio" || anio.valor != null);
+    if (perdidas.length > 0) {
+      alert(`Se guardó, pero ${perdidas.map(c => SQL_COL_VEH[c].que).join(" y ")} no: falta correr ${perdidas.map(c => SQL_COL_VEH[c].sql).join(" y ")}.`);
+    }
     setFormVeh(FORM_VEH); setCapTanqueT({}); setEditVehId(null); setMostrarFormVeh(false);
     await Promise.all([refrescarDetalle(empresaSel), cargarIndice()]);
     setGuardando(false);
@@ -1653,6 +1701,16 @@ export default function EmpresasTercerizadasPage() {
                           <input className={inputCls()} value={formVeh.modelo}
                             onChange={e => setFormVeh(p => ({ ...p, modelo: e.target.value }))} />
                         </Campo>
+                        <Campo label="Año de fabricación">
+                          <input type="number" inputMode="numeric" min={ANIO_MIN_VEH} max={Number(fechaLima().slice(0, 4)) + 1} step={1}
+                            className={inputCls()} placeholder="Opcional"
+                            value={formVeh.anio} onChange={e => setFormVeh(p => ({ ...p, anio: e.target.value }))} />
+                          {colAnioVeh === false && (
+                            <p className="text-[10px] text-amber-700 mt-1">
+                              No se guardará: falta correr supabase/licitaciones-04-columnas-accesorias.sql.
+                            </p>
+                          )}
+                        </Campo>
                         <Campo label="Estado">
                           <select className={inputCls()} value={formVeh.estado}
                             onChange={e => setFormVeh(p => ({ ...p, estado: e.target.value }))}>
@@ -1781,7 +1839,10 @@ export default function EmpresasTercerizadasPage() {
                                   <td className="p-2 text-gray-300 w-4">{abierto ? "▾" : "▸"}</td>
                                   <td className="p-2 font-mono font-black text-gray-900">{v.placa}</td>
                                   <td className="p-2 text-gray-500">{v.categoria || "—"}</td>
-                                  <td className="p-2 text-gray-500">{[v.marca, v.modelo].filter(Boolean).join(" ") || "—"}</td>
+                                  <td className="p-2 text-gray-500">
+                                    {[v.marca, v.modelo].filter(Boolean).join(" ") || "—"}
+                                    {v.anio != null && <span className="text-gray-400"> · {v.anio}</span>}
+                                  </td>
                                   <td className="p-2 text-gray-500">{v.capacidad ?? "—"}</td>
                                   <td className="p-2 font-mono text-gray-700">
                                     {v.kilometraje_actual != null ? Number(v.kilometraje_actual).toLocaleString("es-PE") : "—"}
@@ -1805,7 +1866,7 @@ export default function EmpresasTercerizadasPage() {
                                     <div className="flex gap-1.5" onClick={ev => ev.stopPropagation()}>
                                       <button onClick={() => setModalOdoVeh(v)} title="Odómetro" className="hover:opacity-70">📷</button>
                                       <button title="Editar" className="text-gray-400 hover:text-gray-800"
-                                        onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "" }); setCapTanqueT(capTanqueTAForm(v.capacidad_tanque)); setEditVehId(v.id); setMostrarFormVeh(true); }}>✏️</button>
+                                        onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "", anio: v.anio != null ? String(v.anio) : "" }); setCapTanqueT(capTanqueTAForm(v.capacidad_tanque)); setEditVehId(v.id); setMostrarFormVeh(true); }}>✏️</button>
                                       <button className="text-red-400 hover:text-red-600" title="Eliminar"
                                         onClick={async () => { if (!confirm(`¿Eliminar la unidad ${v.placa}?`)) return; await supabase.from("vehiculos_tercero").delete().eq("id", v.id); await Promise.all([refrescarDetalle(empresaSel), cargarIndice()]); }}>✕</button>
                                     </div>
@@ -1824,6 +1885,9 @@ export default function EmpresasTercerizadasPage() {
                                         <div className="flex-1 min-w-[200px]">
                                           <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">Características</p>
                                           <p className="text-xs text-gray-600">{v.descripcion_unidad || "Sin descripción registrada."}</p>
+                                          {v.anio != null && (
+                                            <p className="text-[10px] text-gray-400 mt-1.5">Año de fabricación: <span className="font-mono">{v.anio}</span></p>
+                                          )}
                                           {v.tipo_vehiculo_costeo && (
                                             <p className="text-[10px] text-gray-400 mt-1.5">Costeo: <span className="font-mono">{v.tipo_vehiculo_costeo}</span></p>
                                           )}
@@ -1864,7 +1928,7 @@ export default function EmpresasTercerizadasPage() {
                               {!v.foto_externa_url && !v.foto_interna_url && <span className="text-2xl">🚌</span>}
                               <div className="flex-1">
                                 <p className="font-black font-mono text-gray-900">{v.placa}</p>
-                                <p className="text-xs text-gray-400">{v.categoria} · {v.marca} {v.modelo}{v.capacidad ? ` · ${v.capacidad} pax` : ""}</p>
+                                <p className="text-xs text-gray-400">{v.categoria} · {v.marca} {v.modelo}{v.anio != null ? ` · ${v.anio}` : ""}{v.capacidad ? ` · ${v.capacidad} pax` : ""}</p>
                                 {v.descripcion_unidad && (
                                   <p className="text-[10px] text-gray-500 mt-0.5 line-clamp-2">{v.descripcion_unidad}</p>
                                 )}
@@ -1884,7 +1948,7 @@ export default function EmpresasTercerizadasPage() {
                                   style={{ background: v.estado === "disponible" ? "#dcfce7" : "#f3f4f6", color: v.estado === "disponible" ? "#166534" : "#4b5563" }}>
                                   {v.estado}
                                 </span>
-                                <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "" }); setCapTanqueT(capTanqueTAForm(v.capacidad_tanque)); setEditVehId(v.id); setMostrarFormVeh(true); }}
+                                <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "", anio: v.anio != null ? String(v.anio) : "" }); setCapTanqueT(capTanqueTAForm(v.capacidad_tanque)); setEditVehId(v.id); setMostrarFormVeh(true); }}
                                   className="text-xs font-bold text-gray-500 hover:text-gray-800">✏️</button>
                                 <button onClick={async () => { if (!confirm("¿Eliminar?")) return; await supabase.from("vehiculos_tercero").delete().eq("id", v.id); await Promise.all([refrescarDetalle(empresaSel), cargarIndice()]); }}
                                   className="text-xs font-bold text-red-400 hover:text-red-600">✕</button>

@@ -70,6 +70,14 @@ export const TIPOS_SEGURO: Record<string, TipoSeguroConfig> = {
     descripcion: "Responsabilidad civil frente a terceros — por vehículo o flota",
     renovacion: "Anual", entidadLabel: "vehículo/empresa",
   },
+  // La piden las bases de licitaciones (transporte de personal de empresas): cubre al CLIENTE ante
+  // robos, fraudes o daños dolosos del personal del postor. Es de la empresa, no de una placa.
+  deshonestidad: {
+    label: "Deshonestidad", icon: "🔒", color: "#be123c", bg: "#ffe4e6",
+    categoria: "complementario",
+    descripcion: "Póliza de deshonestidad (fidelidad) — pérdidas por actos deshonestos del personal",
+    renovacion: "Anual", entidadLabel: "empresa",
+  },
   sctr_salud: {
     label: "SCTR Salud", icon: "🏥", color: "#0f766e", bg: "#f0fdfa",
     categoria: "obligatorio",

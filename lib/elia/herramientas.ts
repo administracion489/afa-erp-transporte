@@ -12,6 +12,7 @@ import { familiaCombustible, configCombustible, capacidadTanqueDe } from "@/lib/
 import { utilizacionParaElia } from "@/lib/flota/uso-flota";
 import { cargarSeguros } from "@/lib/seguros-datos";
 import { TIPOS_SEGURO, SCTR_SIN_PRECISAR, kpisSeguros } from "@/lib/seguros";
+import { CATEGORIAS_DOCUMENTO } from "@/lib/documentos-empresa-categorias";
 import { entradaUsoParaElia } from "@/lib/flota/uso-flota-datos";
 import type {
   BloqueUI,
@@ -113,6 +114,7 @@ export const RUTAS_MODULO: { href: string; etiqueta: string; modulo: string; ali
   { href: "/crm/pipeline", etiqueta: "Pipeline CRM", modulo: "crm", alias: ["pipeline", "embudo", "leads"] },
   { href: "/crm/agente", etiqueta: "Agente IA del CRM", modulo: "crm", alias: ["agente ia", "afita", "agente crm"] },
   { href: "/cotizaciones/plantillas", etiqueta: "Plantillas PDF", modulo: "cotizaciones", alias: ["plantillas", "plantillas pdf"] },
+  { href: "/licitaciones", etiqueta: "Licitaciones", modulo: "licitaciones", alias: ["licitaciones", "licitacion", "licitación", "propuesta tecnica", "propuesta técnica", "concurso"] },
   { href: "/mantenimiento/planes", etiqueta: "Planes Fabricante", modulo: "mantenimiento", alias: ["planes fabricante", "plan de mantenimiento"] },
   { href: "/despachador", etiqueta: "Despachador", modulo: "despachador", alias: ["despachador", "despacho", "urgentes"] },
   { href: "/calendario", etiqueta: "Calendario", modulo: "dashboard", alias: ["calendario", "agenda"] },
@@ -486,11 +488,14 @@ const TOOLS_DEF: any[] = [
   {
     name: "consultar_documentos_empresa",
     description:
-      "Documentos corporativos (contratos, SST, capacitaciones, permisos, legales): vencidos y por vencer, por categoría y alcance (empresa, cliente, proveedor, conductor). Úsala para '¿qué contratos vencen pronto?', '¿los docs de SST están al día?'.",
+      "Documentos corporativos (contratos, SST, capacitaciones, permisos, legales, el legajo para licitaciones —ficha RUC, vigencia de poder, plan SST…— y los documentos de conductores): vencidos y por vencer, por categoría y alcance (empresa, cliente, proveedor, conductor). Úsala para '¿qué contratos vencen pronto?', '¿los docs de SST están al día?', '¿la vigencia de poder está vigente?'.",
     input_schema: {
       type: "object",
       properties: {
-        categoria: { type: "string", enum: ["contrato", "guia_remision", "sst", "capacitacion", "permiso", "legal", "factura", "interno", "otro"] },
+        // La lista ÚNICA de categorías (lib/documentos-empresa-categorias.ts): la misma que /documentos
+        // y el legajo de licitaciones. Una copia aquí dejaría a ELIA sin poder filtrar lo que esas
+        // pantallas escriben.
+        categoria: { type: "string", enum: [...CATEGORIAS_DOCUMENTO] },
         solo_alertas: { type: "boolean" },
       },
     },
