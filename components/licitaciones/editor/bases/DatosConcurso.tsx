@@ -2,12 +2,11 @@
 // components/licitaciones/editor/bases/DatosConcurso.tsx — Las COLUMNAS de la licitación (D1: los datos
 // del concurso viven solo en columnas, no en el doc). El cliente puede ser uno del ERP (cliente_id) o
 // solo un nombre: el nombre es el que se imprime, y se puede ajustar aunque haya cliente del ERP.
-import { useMemo } from "react";
+import { useMemo, type ChangeEvent } from "react";
 import SelectorCliente from "@/components/SelectorCliente";
 import { rotuloCliente, type ClienteBuscable } from "@/lib/clientes-buscador";
 import { ESTADOS_LICITACION, type EstadoLicitacion, type Licitacion } from "@/lib/licitaciones/tipos";
 import type { ColumnasLic } from "../contrato-editor";
-import { anclaDe } from "../contrato-editor";
 import { ETIQUETA_ESTADO } from "../etiquetas";
 import CampoEntero from "./CampoEntero";
 import { Campo, INPUT, Tarjeta, aTope } from "./ui";
@@ -26,7 +25,7 @@ export default function DatosConcurso({ lic, cambiarColumnas, soloLectura }: Pro
   };
   const fecha = (k: "fecha_consultas" | "fecha_presentacion" | "fecha_inicio_servicio") => ({
     type: "date" as const, value: lic[k] ?? "", disabled: soloLectura, className: INPUT,
-    onChange: (e: React.ChangeEvent<HTMLInputElement>) => cambiarColumnas({ [k]: e.target.value || null }),
+    onChange: (e: ChangeEvent<HTMLInputElement>) => cambiarColumnas({ [k]: e.target.value || null }),
   });
   const inicioAntes = lic.fecha_inicio_servicio && lic.fecha_presentacion && lic.fecha_inicio_servicio < lic.fecha_presentacion;
   const consultasDespues = lic.fecha_consultas && lic.fecha_presentacion && lic.fecha_consultas > lic.fecha_presentacion;
@@ -98,8 +97,6 @@ export default function DatosConcurso({ lic, cambiarColumnas, soloLectura }: Pro
           </Campo>
         </div>
       </div>
-      {/* Mismo ancla que usan los hallazgos de fechas: el panel «datos». */}
-      <span id={anclaDe("requisito", "__datos__")} hidden />
     </Tarjeta>
   );
 }
