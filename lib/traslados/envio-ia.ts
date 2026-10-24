@@ -343,7 +343,8 @@ export function zonaConEnvio(z: Zona | null | undefined, zonas: readonly ZonaEnv
 export type CodigoRevision =
   | "maestro_apagado" | "zona_sin_envio" | "modo_copiloto" | "sin_remitente"
   | "perfil_sin_configurar" | "importes_no_cuadran" | "pdf_no_generado" | "palabras_de_pedido_complejo"
-  | "texto_libre_sospechoso" | "cuentas_distintas" | "condiciones_demasiadas" | "condiciones_en_otro_idioma";
+  | "texto_libre_sospechoso" | "cuentas_distintas" | "condiciones_demasiadas" | "condiciones_en_otro_idioma"
+  | "editada_a_mano";
 
 export const MOTIVO_REVISION: Record<CodigoRevision, { texto: string; arreglo: string }> = {
   maestro_apagado: {
@@ -393,6 +394,13 @@ export const MOTIVO_REVISION: Record<CodigoRevision, { texto: string; arreglo: s
   condiciones_en_otro_idioma: {
     texto: "La cotización va en inglés pero sus condiciones salieron de una plantilla en castellano.",
     arreglo: `Asigna una plantilla en inglés a «${etiquetaCeldaTraslado({ idioma: "en", moneda: "PEN" })}» o «${etiquetaCeldaTraslado({ idioma: "en", moneda: "USD" })}» (la de la moneda de esta cotización) en /cotizaciones/plantillas.`,
+  },
+  // Revisión de seguridad (23-10-2026): al REUSAR una cotización pendiente, la fila ya no es la que
+  // escribió la IA (su huella no coincide con la que quedó en la acción) o la acción es de antes de que
+  // existiera la huella y no se puede comprobar (`canonImprimible` en ./cotizacion-traslado.ts).
+  editada_a_mano: {
+    texto: "La cotización se editó en /cotizaciones después de que la IA la cotizó (o no se puede comprobar que no se editó): la envía un ejecutivo.",
+    arreglo: "Revisa en «Ver PDF» el recojo, el destino, la descripción, las fechas y las condiciones antes de enviarla con «Enviar al cliente».",
   },
 };
 
@@ -449,7 +457,11 @@ export function planEnvio(x: {
   palabras: string[];
   /** El recojo, el destino y el nombre del contacto tal como llegaron (sin recortar). */
   textosLibres?: (string | null | undefined)[];
-  /** El idioma de la cotización: con «en», los textos libres se juzgan con castellano ∪ inglés. */
+  /**
+   * El idioma de la GUARDA de los textos libres (`idiomaDeGuarda`): con «en», castellano ∪ inglés. Es
+   * «en» con la cotización en inglés y también con el cliente escribiendo en inglés u otro idioma
+   * aunque el inglés esté apagado.
+   */
   idioma?: IdiomaTexto;
 }): { decision: DecisionEnvio; motivos: CodigoRevision[] } {
   const r = x.resultado;
@@ -665,7 +677,16 @@ export type TrasladoDelTurno = {
 export function textoFinalTraslado(
   texto: string,
   t: TrasladoDelTurno | null | undefined,
-  x: { derivacion: string; estilo: EstiloMensajes },
+  x: {
+    derivacion: string; estilo: EstiloMensajes;
+    /**
+     * El idioma de la GUARDA, que no es el del mensaje (`idiomaDeGuarda`): «en» también con el inglés
+     * APAGADO cuando el cliente escribe en inglés u otro idioma (el modelo le contesta en inglés y el
+     * texto se juzga con castellano ∪ inglés); el mensaje que escribe el código sigue en el idioma del
+     * estilo. Sin él, la de siempre: la del estilo.
+     */
+    idiomaGuarda?: IdiomaTexto;
+  },
 ): string {
   if (!t) return texto;
   const c = t.cotizacion;
@@ -675,12 +696,23 @@ export function textoFinalTraslado(
     });
   }
   // En inglés, los guards de dinero son castellano ∪ inglés (el modelo puede contestar en los dos).
-  const idioma: IdiomaTexto = x.estilo?.idioma === "en" ? "en" : "es";
+  const idioma: IdiomaTexto = x.estilo?.idioma === "en" || x.idiomaGuarda === "en" ? "en" : "es";
   if (!texto || !mencionaDinero(texto, idioma)) return texto;
   const faltan = t.accion === "preguntar" ? (t.faltan ?? []).filter(Boolean) : [];
   // Lo que reemplaza al texto del modelo tampoco puede hablar de dinero (última barrera).
   const f = faltan.length ? fraseFaltanTraslado(faltan, x.estilo) : "";
   return f && !mencionaDinero(f, idioma) ? f : x.derivacion;
+}
+
+/**
+ * El idioma de las GUARDAS de un turno (revisión S1, 23-10-2026), separado del idioma del MENSAJE: «en»
+ * (castellano ∪ inglés, que solo puede ser MÁS estricto) si el mensaje va en inglés o si el código
+ * detectó que el cliente escribe en inglés u otro idioma (`idiomaDelCliente`) — también con el inglés
+ * APAGADO, que es justo cuando el modelo le contesta en inglés y los textos del código siguen en
+ * castellano. Sin evidencia de otro idioma, «es»: la guarda de siempre, byte a byte.
+ */
+export function idiomaDeGuarda(cliente: IdiomaCliente | null | undefined, idiomaMensaje?: string | null): IdiomaTexto {
+  return idiomaMensaje === "en" || cliente === "en" || cliente === "otro" ? "en" : "es";
 }
 
 /** Qué campo libre es sospechoso y por qué, para la nota del ejecutivo (con «en», castellano ∪ inglés). */

@@ -29,7 +29,11 @@
 //    inglés pasarían a dólares sin que nadie lo decidiera. En inglés, una celda sin plantilla
 //    inglesa que sirva cae a la de castellano de la MISMA moneda y lo DICE (`sin_plantilla_idioma`):
 //    las condiciones salen en castellano y la cotización queda en revisión (envio-ia.ts →
-//    `condiciones_en_otro_idioma`) — no se traduce lo que nadie escribió.
+//    `condiciones_en_otro_idioma`) — no se traduce lo que nadie escribió. EN INGLÉS NUNCA SE CAE A LA
+//    PRINCIPAL (revisión de seguridad, 23-10-2026): una principal en inglés no es la decisión de cotizar
+//    en inglés en ESA moneda, y con ella la cotización salía sola con las condiciones de la principal
+//    mientras Ajustes decía «queda en revisión». Solo una celda inglés ASIGNADA alimenta un envío
+//    automático en inglés.
 //
 // 4. LAS CONDICIONES SE COPIAN A LA FILA (versión 2, `CONSID_VERSION` en lib/cotizacion-idioma.ts).
 //    Antes, en español, las de la plantilla ganaban sobre las de la fila al IMPRIMIR: lo que el
@@ -326,9 +330,9 @@ export function reglasTrasladoQueUsan(r: readonly ReglaTraslado[] | null | undef
  * - `sin_reglas`: falta la tabla de reglas (el SQL). En `traslado_ia` devuelve null (quien llama usa
  *   `traslados_config`, como antes); en los demás, la principal.
  * - `sin_plantilla`: no hay una principal que sirva → null.
- * - `sin_plantilla_idioma` (solo `plantillaTrasladoIA`): la celda «inglés» no tiene una plantilla
- *   en inglés que sirva (ni la principal) → la de la celda castellano de la MISMA moneda, con sus
- *   condiciones en castellano (`idiomaCondiciones: "es"`).
+ * - `sin_plantilla_idioma` (solo `plantillaTrasladoIA`): la celda «inglés» no tiene ASIGNADA una
+ *   plantilla en inglés que sirva (la principal no cuenta en inglés) → la de la celda castellano de
+ *   la MISMA moneda, con sus condiciones en castellano (`idiomaCondiciones: "es"`).
  */
 export type CodigoUso = "regla" | "principal" | "regla_inactiva" | "regla_no_sirve_ia" | "sin_reglas" | "sin_plantilla" | "sin_plantilla_idioma";
 
@@ -386,12 +390,14 @@ export type UsoPlantillaTraslado = UsoPlantilla & {
  *  · SIN la tabla nueva (`reglasTraslado === null`): EXACTAMENTE `plantillaParaUso({servicio:
  *    "traslado_ia", segmento}, …)` con las reglas viejas (`legado`), byte a byte lo de hoy.
  *  · Con ella: la celda si su plantilla sirve en ESE idioma (`regla`); si no (vacía, inactiva o que
- *    la IA no dibuja en ese idioma), la principal si sirve para ese idioma; y si tampoco:
- *     - en castellano, `sin_plantilla` y null (quien llama usa las condiciones de Ajustes de
- *       traslados, como hoy);
- *     - en inglés, lo que daría la celda castellano de la MISMA moneda, con `sin_plantilla_idioma`
- *       y sus condiciones en castellano: es la única forma en que en inglés sale una plantilla en
- *       castellano, y la cotización queda en revisión (`condiciones_en_otro_idioma`).
+ *    la IA no dibuja en ese idioma):
+ *     - en castellano, la principal si sirve en castellano; y si tampoco, `sin_plantilla` y null
+ *       (quien llama usa las condiciones de Ajustes de traslados, como hoy);
+ *     - en inglés, NUNCA la principal (aunque sea una corporativa en inglés): lo que daría la celda
+ *       castellano de la MISMA moneda, con `sin_plantilla_idioma` y sus condiciones en castellano, y
+ *       la cotización queda en revisión (`condiciones_en_otro_idioma`). Así solo una celda inglés
+ *       ASIGNADA por una persona alimenta un envío automático en inglés, que es lo mismo que dice
+ *       `inglesDisponible` (la principal no enciende el inglés) y lo que dice Ajustes.
  * Nunca devuelve una plantilla inactiva (`sirveParaIA` lo exige).
  */
 export function plantillaTrasladoIA(
@@ -424,7 +430,8 @@ export function plantillaTrasladoIA(
     : !p || !esActiva(p)
       ? ["regla_inactiva", `${celdaTxt}: la regla apunta a ${p ? `${nombre(p)}, que está desactivada` : `«${r.plantilla_id}», que ya no existe`}.`]
       : ["regla_no_sirve_ia", `${celdaTxt}: la regla apunta a ${nombre(p)}, que la IA no puede usar aquí (${queDibuja}).`];
-  if (sirveParaIA(principal, idioma)) {
+  // En inglés la principal no cuenta (ver arriba): solo en castellano se cae a ella.
+  if (idioma === "es" && sirveParaIA(principal, idioma)) {
     return {
       plantilla: principal, codigo: codigoCelda, detalle: `${porque} Se usa la plantilla principal ${nombre(principal as PlantillaFila)}.`,
       celda, idiomaCondiciones: idioma,
@@ -439,14 +446,18 @@ export function plantillaTrasladoIA(
       celda, idiomaCondiciones: null,
     };
   }
-  // En inglés sin plantilla inglesa que sirva: la de castellano de la misma moneda, y se dice.
+  // En inglés sin una plantilla inglesa ASIGNADA que sirva (la principal no cuenta): la de castellano
+  // de la misma moneda, y se dice.
   const es = plantillaTrasladoIA({ idioma: "es", moneda }, plantillas, reglasTraslado, legado);
   const conQue = es.plantilla
     ? `Se usa la de ${etiquetaCeldaTraslado({ idioma: "es", moneda })}, ${nombre(es.plantilla)}, con sus condiciones en castellano`
     : "Se usan las condiciones de Ajustes de traslados, en castellano";
+  // La razón va ANTES de la frase « No hay una plantilla en inglés que la IA pueda usar.»: la pantalla
+  // de /tarifario separa por ella (`MARCA_SIN_PLANTILLA_INGLES`), así que la frase no cambia.
+  const razon = !r ? `${celdaTxt}: sin regla (en inglés no se usa la plantilla principal).` : porque;
   return {
     plantilla: es.plantilla, codigo: "sin_plantilla_idioma",
-    detalle: `${porque} No hay una plantilla en inglés que la IA pueda usar. ${conQue}: la cotización queda en revisión. Se arregla asignando una plantilla en inglés a ${celdaTxt} en /cotizaciones/plantillas.`,
+    detalle: `${razon} No hay una plantilla en inglés que la IA pueda usar. ${conQue}: la cotización queda en revisión. Se arregla asignando una plantilla en inglés a ${celdaTxt} en /cotizaciones/plantillas.`,
     celda, idiomaCondiciones: "es",
   };
 }

@@ -139,11 +139,13 @@ const MONEDA_MAS_Y_MONTO = new RegExp(String.raw`(?:^|[^a-z0-9])${MONEDA_MAS}\s*
 const MONTO_Y_MONEDA_MAS = new RegExp(String.raw`(?:^|[^a-z0-9])${MONTO}\s*(?:${MONEDA_MAS}|${MONEDA_MAS_SUFIJO})(?![a-z])`);
 /**
  * Un importe EN LETRAS que no es un «un», «una» o «dos» suelto (que casi siempre cuentan otra cosa:
- * «sería un placer», «serán dos personas»): dos o más palabras de número («ciento cincuenta») o una de
- * veinte para arriba («cincuenta», «doscientos», «mil»).
+ * «sería un placer», «serán dos personas»): dos o más palabras de número que no empiezan por «un» ni
+ * «cero» («ciento cincuenta»; «un cero» no) o una de veinte para arriba («cincuenta», «doscientos», «mil»).
+ * Siempre el número ENTERO: «cuarenta y cinco personas» no se corta en «cuarenta» para esquivar la
+ * exclusión de «personas».
  */
 const GRANDE = String.raw`(?:veinte|veinti[a-z]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien|ciento|quinient[oa]s|[a-z]+cient[oa]s|mil|millon(?:es)?)`;
-const LETRAS_IMPORTE = String.raw`(?:${PALABRA_NUMERO}(?:\s+(?:y\s+)?${PALABRA_NUMERO})+|${GRANDE})(?![a-z])`;
+const LETRAS_IMPORTE = String.raw`(?:(?!(?:un[oa]?|cero)\b)${PALABRA_NUMERO}(?:\s+(?:y\s+)?${PALABRA_NUMERO})+|${GRANDE})(?![a-z])(?!\s+(?:y\s+)?${PALABRA_NUMERO}(?![a-z]))`;
 /** Lo que, después de un número en letras, dice que no es dinero (además de `NO_ES_DINERO`). */
 const NO_ES_DINERO_LETRAS = String.raw`${NO_ES_DINERO}|y\s+media|y\s+cuarto|en\s+punto|anos?\b|veces|vez\b|cuadras?\b|metros?\b`;
 /** Antes del número en letras: «a las veinte» es una hora. */
@@ -205,10 +207,57 @@ const PISTA_Y_CIFRA_INGLES = new RegExp(
   String.raw`|people\b|persons?\b|passengers?\b|bags?\b|suitcases?\b|luggage\b|minutes?\b|hours?\b|days?\b|nights?\b|seats?\b|flights?\b|${MESES_INGLES}\b|st\b|nd\b|rd\b|th\b|of\s+${MESES_INGLES}\b))`,
 );
 
+// ── 2c. Lo que se SUMÓ en inglés en la revisión S1 (alternativas nuevas: las de arriba no cambian) ──
+
+/** «fifty pounds», «one hundred gbp», «£ fifty»: las monedas nuevas con un importe también en letras inglesas. */
+const MONEDA_MAS_Y_MONTO_INGLES = new RegExp(String.raw`(?:^|[^a-z0-9])${MONEDA_MAS}\s*${MONTO_INGLES}(?![a-z0-9])`);
+const MONTO_Y_MONEDA_MAS_INGLES = new RegExp(String.raw`(?:^|[^a-z0-9])${MONTO_INGLES}\s*(?:${MONEDA_MAS}|${MONEDA_MAS_SUFIJO})(?![a-z])`);
+/** «No charge for waiting», «at no extra cost»: es hablar de lo que se cobra. */
+const PALABRAS_DINERO_INGLES_MAS = /\bno\s+(?:extra\s+)?charge\b|\bat\s+no\s+(?:extra\s+)?cost\b/;
+/** Lo que, después de la cifra o del número en letras, dice que no es dinero en inglés (además del castellano). */
+const NO_ES_DINERO_INGLES = String.raw`${NO_ES_DINERO}|people\b|persons?\b|passengers?\b|bags?\b|suitcases?\b|luggage\b|minutes?\b|hours?\b|days?\b|nights?\b|seats?\b|flights?\b|${MESES_INGLES}\b|st\b|nd\b|rd\b|th\b|of\s+${MESES_INGLES}\b` +
+  String.raw`|of\s+(?:us|you|them)\b|more\s+(?:people|passengers|bags)|o['’]?\s?clock|past\b|years?\b|times?\b|blocks?\b|stops?\b|steps?\b|floors?\b|terminals?\b|gates?\b|vehicles?\b|cars?\b|vans\b|buses\b|drivers?\b|kids?\b|children\b|adults?\b|guests?\b|rooms?\b|meters?\b|metres?\b|miles?\b|kilos?\b|kilometers?\b|weeks?\b|months?\b|pieces?\b|items?\b`;
+/** Un importe en letras inglesas que no es un «one» suelto («it's one of the best»): dos o más palabras, o una de twenty para arriba. */
+const GRANDE_INGLES = String.raw`(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundreds?|thousands?|millions?)`;
+const LETRAS_IMPORTE_INGLES = String.raw`(?:${PALABRA_NUMERO_INGLES}(?:[\s-]+(?:and\s+)?${PALABRA_NUMERO_INGLES})+|${GRANDE_INGLES})(?![a-z])(?![\s-]+(?:and\s+)?${PALABRA_NUMERO_INGLES}(?![a-z]))`;
+/** Antes del número en letras: «at twenty past ten» es una hora. */
+const NO_ES_HORA_INGLES = String.raw`(?<!\bat\s+)`;
+/** Las palabras de precio de siempre en inglés, más «fare» y «roughly». */
+const PISTAS_PRECIO_INGLES = String.raw`(?:total|prices?|costs?|fees?|rates?|charges?|charged|pay|around|approx[a-z]*|about|would\s+be|fares?|roughly)`;
+/** «the fare is 150», «fare: 150», «roughly 150»: las pistas nuevas con una cifra (la estructura de siempre). */
+const PISTA_NUEVA_Y_CIFRA_INGLES = new RegExp(
+  String.raw`\b(?:fares?|roughly)\b(?:[^a-z0-9]+(?!${MESES_INGLES}\b)[a-z]+){0,3}?[^a-z0-9]+${CIFRA}` +
+  String.raw`(?![0-9]|[.,][0-9]|[-/:][0-9]|\s*(?:${NO_ES_DINERO_INGLES}))`,
+);
+/** «The total would be one hundred fifty», «Price: one fifty», «it costs a hundred and fifty». */
+const PISTA_Y_LETRAS_INGLES = new RegExp(
+  String.raw`\b${PISTAS_PRECIO_INGLES}\b(?:[^a-z0-9]+(?!${MESES_INGLES}\b)[a-z]+){0,3}?[^a-z0-9]+${NO_ES_HORA_INGLES}${LETRAS_IMPORTE_INGLES}(?!\s*(?:${NO_ES_DINERO_INGLES}))`,
+);
+/**
+ * Pistas cortas pegadas al importe (a lo sumo «just», «only», «about»… en medio), con una cifra de 2+
+ * dígitos o un importe en letras: «That will be 150.», «It's 150 for the van.», «it's just 150», «It
+ * comes to 150 per leg.». Con un «4» no, ni con quien será el sujeto («you will be 15?», «there will be
+ * 12»: son pasajeros), ni con una hora («it's 10:30»), una fecha («it's October 25») o lo que cuenta
+ * otra cosa («it's 12 km», «that will be 30 of us»).
+ */
+const PISTA_CORTA_INGLES = new RegExp(
+  String.raw`\b(?:(?:it|that)(?:['’]?s|\s+is|\s+would\s+be|\s+will\s+be)|(?<!\b(?:you|we|they|there|i|he|she)\s+)will\s+be|comes?\s+to|came\s+to)\s+(?:just\s+|only\s+|about\s+|around\s+|roughly\s+|approximately\s+|a\s+total\s+of\s+)?` +
+  String.raw`(?:${CIFRA_2}|${NO_ES_HORA_INGLES}${LETRAS_IMPORTE_INGLES})(?!\s*(?:${NO_ES_DINERO_INGLES}))`,
+);
+/** «150 per leg», «75 each way», «150 for the round trip»: el importe con la unidad que se cobra. */
+const CIFRA_POR_TRAMO_INGLES = new RegExp(String.raw`(?:^|[^a-z0-9.,])${CIFRA_2}\s+(?:(?:per|a|each)\s+(?:leg|way)\b|(?:for\s+the\s+)?round\s+trip\b)`);
+
+/** Las alternativas nuevas del inglés. */
+function mencionaDineroInglesMas(t: string): boolean {
+  return MONEDA_MAS_Y_MONTO_INGLES.test(t) || MONTO_Y_MONEDA_MAS_INGLES.test(t) || PALABRAS_DINERO_INGLES_MAS.test(t)
+    || PISTA_NUEVA_Y_CIFRA_INGLES.test(t) || PISTA_Y_LETRAS_INGLES.test(t) || PISTA_CORTA_INGLES.test(t) || CIFRA_POR_TRAMO_INGLES.test(t);
+}
+
 /** Solo la parte inglesa de `mencionaDinero` (el castellano se mira aparte). */
 function mencionaDineroIngles(t: string): boolean {
   return MONEDA_Y_MONTO_INGLES.test(t) || MONTO_Y_MONEDA_INGLES.test(t)
-    || PORCENTAJE_INGLES.test(t) || PALABRAS_DINERO_INGLES.test(t) || PISTA_Y_CIFRA_INGLES.test(t);
+    || PORCENTAJE_INGLES.test(t) || PALABRAS_DINERO_INGLES.test(t) || PISTA_Y_CIFRA_INGLES.test(t)
+    || mencionaDineroInglesMas(t);
 }
 
 /**
@@ -224,7 +273,8 @@ export function mencionaDinero(texto: string, idioma: IdiomaTexto = "es"): boole
   if (!t.trim()) return false;
   const castellano = importesEnTexto(texto).length > 0
     || MONEDA_Y_MONTO.test(t) || MONTO_Y_MONEDA.test(t)
-    || PORCENTAJE.test(t) || PALABRAS_DINERO.test(t) || PISTA_Y_CIFRA.test(t);
+    || PORCENTAJE.test(t) || PALABRAS_DINERO.test(t) || PISTA_Y_CIFRA.test(t)
+    || mencionaDineroMas(t);
   return castellano || (idioma === "en" && mencionaDineroIngles(t));
 }
 
@@ -265,27 +315,75 @@ const PALABRAS_PAGO_INGLES = [
 ];
 const FRASES_PAGO_INGLES = ["western union"];
 
-const traePalabraDePago = (crudo: string, idioma: IdiomaTexto): boolean => {
+/**
+ * Las que se SUMARON en la revisión S1 (23-10-2026), SOLO para el texto libre (recojo, destino, nombre
+ * del contacto, nombre del pasajero): servicios de envío de dinero y criptomonedas, y el «adelanto».
+ * Las condiciones de la plantilla (`motivosLineaIA`) siguen con las listas de antes: «adelanto» y
+ * «prepayment» son las palabras con que toda política de reserva describe el adelanto, y marcarlas
+ * pintaría de ámbar la política de cada empresa (y un aviso que sale siempre se vuelve paisaje).
+ */
+const PALABRAS_PAGO_MAS = ["adelanto", "adelantos", "prepago", "prepagos", "cripto", "criptos", "criptomoneda", "criptomonedas", "billetera", "billeteras"];
+const PALABRAS_PAGO_INGLES_MAS = [
+  "revolut", "skrill", "bitcoin", "bitcoins", "btc", "crypto", "cryptos", "cryptocurrency", "usdt", "wallet", "wallets",
+  "iban", "swift", "moneygram", "cashapp", "remit", "remittance", "prepay", "prepaid", "prepayment",
+];
+const FRASES_PAGO_INGLES_MAS = ["cash app", "money gram"];
+
+/** `mas` = con las palabras de la revisión S1 (el texto libre); sin él, las listas de antes (las condiciones). */
+const traePalabraDePago = (crudo: string, idioma: IdiomaTexto, mas = false): boolean => {
   const pal = porPalabra(crudo);
-  if (PALABRAS_PAGO.some((p) => pal.includes(` ${p} `))) return true;
+  const hay = (ls: readonly string[]) => ls.some((p) => pal.includes(` ${p} `));
+  if (hay(PALABRAS_PAGO) || (mas && hay(PALABRAS_PAGO_MAS))) return true;
   if (idioma !== "en") return false;
-  return PALABRAS_PAGO_INGLES.some((p) => pal.includes(` ${p} `)) || FRASES_PAGO_INGLES.some((p) => pal.includes(` ${p} `));
+  return hay(PALABRAS_PAGO_INGLES) || hay(FRASES_PAGO_INGLES) || (mas && (hay(PALABRAS_PAGO_INGLES_MAS) || hay(FRASES_PAGO_INGLES_MAS)));
 };
 
 /**
- * Por qué un texto libre NO se puede imprimir sin que lo vea una persona, o null si se puede. Se
- * declara el motivo (el primero que aplica, en este orden) para que la nota del ejecutivo lo diga.
+ * Los verbos que ORDENAN pagar o confirmar, en los dos idiomas y en los dos modos (no hay verbo que
+ * signifique otra cosa en una dirección): «send», «pay», «prepay», «confirm», «envíe», «enviar»,
+ * «pague», «confirmar»… Nunca «transfer» (es el servicio que se cotiza). «Calle Confirmación» no es un
+ * verbo («confirmacion» no está en la lista).
  */
-export function textoLibreSospechoso(s: string | null | undefined, idioma: IdiomaTexto = "es"): MotivoTextoLibre | null {
+const VERBOS_ORDEN_PAGO = [
+  "send", "pay", "prepay", "confirm",
+  "envie", "envien", "enviar", "envia", "envias", "enviame", "envieme", "envienos",
+  "pague", "paguen", "pagar", "paga", "pagame",
+  "confirmar", "confirme", "confirma", "confirmen",
+];
+/** Fechas y horas: no son el importe de una instrucción de pago («confirm at 10:30», «el 25/12/2026»). */
+const FECHAS_Y_HORAS = /\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/g;
+/**
+ * EL RESPALDO ESTRUCTURAL de la revisión S1: una cifra de 2 o más dígitos (sin contar fechas ni
+ * horas) junto a un verbo que ordena pagar o confirmar. «Prepay 50 to confirm», «John Revolut 50 to
+ * confirm», «Envíe 50 por Skrill para confirmar»: una instrucción de pago aunque no nombre la moneda
+ * ni un servicio que la lista conozca. Una dirección con número y sin esos verbos se imprime igual.
+ */
+const ordenDePagoConCifra = (crudo: string): boolean => {
+  if (!/\d{2,}/.test(minusculas(crudo).replace(FECHAS_Y_HORAS, " "))) return false;
+  const pal = porPalabra(crudo);
+  return VERBOS_ORDEN_PAGO.some((v) => pal.includes(` ${v} `));
+};
+
+/** `textoLibreSospechoso` con o sin lo de la revisión S1 (`mas`): las condiciones (`motivosLineaIA`) van sin. */
+function sospechoso(s: string | null | undefined, idioma: IdiomaTexto, mas: boolean): MotivoTextoLibre | null {
   const crudo = String(s ?? "");
   if (!crudo.trim()) return null;
   const t = minusculas(crudo);
   if (ENLACE.test(t)) return "enlace";
-  if (importesEnTexto(crudo).length > 0 || mencionaDinero(crudo, idioma)) return "importe";
-  if (traePalabraDePago(crudo, idioma)) return "palabra_de_pago";
+  if (importesEnTexto(crudo).length > 0 || mencionaDinero(crudo, idioma) || (mas && ordenDePagoConCifra(crudo))) return "importe";
+  if (traePalabraDePago(crudo, idioma, mas)) return "palabra_de_pago";
   if (NUMERO_LARGO.test(t)) return "numero_largo";
   if (Array.from(crudo.trim()).length > MAX_REFERENCIA) return "muy_largo";
   return null;
+}
+
+/**
+ * Por qué un texto libre NO se puede imprimir sin que lo vea una persona, o null si se puede. Se
+ * declara el motivo (el primero que aplica, en este orden) para que la nota del ejecutivo lo diga.
+ * Una orden de pagar o confirmar con una cifra (el respaldo estructural) cuenta como «importe».
+ */
+export function textoLibreSospechoso(s: string | null | undefined, idioma: IdiomaTexto = "es"): MotivoTextoLibre | null {
+  return sospechoso(s, idioma, true);
 }
 
 const unaLinea = (s: string): string => String(s ?? "").replace(/\s+/g, " ").trim();
@@ -334,14 +432,15 @@ export function motivosLineaIA(linea: string, idioma: IdiomaTexto = "es"): Motiv
   const t = String(linea ?? "");
   if (!t.trim()) return [];
   const out: MotivoTextoLibre[] = [];
-  if (textoLibreSospechoso(t) === "enlace") out.push("enlace");
+  // Con las listas de ANTES de la revisión S1 (`sospechoso(…, false)`): ver PALABRAS_PAGO_MAS.
+  if (sospechoso(t, "es", false) === "enlace") out.push("enlace");
   // Una plantilla en inglés se mira además con las palabras de pago del inglés («Pay to account…»);
   // las frases de dos palabras («western union») se miran sobre la línea entera.
-  if (t.split(/[^\p{L}\p{N}]+/u).some(w => w && textoLibreSospechoso(w, idioma) === "palabra_de_pago")
+  if (t.split(/[^\p{L}\p{N}]+/u).some(w => w && sospechoso(w, idioma, false) === "palabra_de_pago")
     || (idioma === "en" && traePalabraDePago(t, "en"))) out.push("palabra_de_pago");
   // Fechas y horas no son un teléfono ni una cuenta («válido hasta el 31/12/2026»): se quitan antes.
   const sinFechas = t.replace(/\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/g, " ");
-  if (textoLibreSospechoso(sinFechas.replace(/[^\d\s.\-]/g, " ")) === "numero_largo") out.push("numero_largo");
+  if (sospechoso(sinFechas.replace(/[^\d\s.\-]/g, " "), "es", false) === "numero_largo") out.push("numero_largo");
   return out;
 }
 

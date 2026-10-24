@@ -49,16 +49,17 @@ import { validarEntrada, type EntradaSimulador, type LugarEntrada } from "./api"
 import { cargarCatalogo, leerConfigIA, leerIgvPct, SinMigracionTraslados, type CatalogoTraslados } from "./datos";
 import { leerInglesTraslado, plantillaParaTraslado } from "./plantilla-traslado-datos";
 import {
-  cifrasDeFila, cuadraConMotor, filaCotizacionTraslado, resultadoDeFila,
+  canonImprimible, cifrasDeFila, cuadraConMotor, filaCotizacionTraslado, impresosSospechosos, resultadoDeFila,
   type FilaCotizacion, type FilaCotizacionLeida,
 } from "./cotizacion-traslado";
 import {
-  MOTIVO_REVISION, TOPES, decidirTope, entradaDelAgente, figurasPermitidas, firmaPedido, planEnvio,
+  MOTIVO_REVISION, TOPES, decidirTope, entradaDelAgente, figurasPermitidas, firmaPedido, idiomaDeGuarda, planEnvio,
   respuestaDerivar, respuestaEnRevision, respuestaParaModelo, respuestaYaEnviada, revisionPorCondiciones, senalesEnTexto,
   textosDeUbicacion, textosLibresSospechosos,
   type CodigoRevision, type DecisionEnvio,
 } from "./envio-ia";
-import { ETIQUETA_TEXTO_LIBRE } from "./texto-libre";
+import { ETIQUETA_TEXTO_LIBRE, type IdiomaTexto } from "./texto-libre";
+import { createHash } from "node:crypto";
 import { armarPdfDeFila, leerCotizacionTraslado, leerPerfilPdf, type AvisoPdfTraslado, type LogoPdf, type PerfilPdf } from "./enviar-cotizacion-datos";
 import { simularTrasladoConCatalogo } from "./servicio";
 import type { ResultadoTraslado } from "./motor";
@@ -299,11 +300,14 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
   const pedido = pedidoEnUnaLinea(e);
   const firma = firmaPedido(e);
   const libres = camposLibres(e, ctx.contacto?.nombre ?? null);
+  // El idioma de las GUARDAS (revisión S1): con el cliente en inglés u otro idioma, castellano ∪ inglés
+  // también con el inglés apagado (`idiomaDeGuarda`); sin evidencia, el castellano de siempre.
+  const guarda: IdiomaTexto = idiomaDeGuarda(idioma.cliente, e.idioma_cliente ? "en" : "es");
 
   // 3) ¿Ya se cotizó este mismo pedido?
   const previa = await accionPrevia(sb, ctx.conv.id, firma, ahora);
   if (!previa.ok) return deriva("No se pudo comprobar si este pedido ya se cotizó", pedido, previa.detalle);
-  if (previa.accion) return reusar(ctx, deps, previa.accion, { pedido, firma, textos, libres, ahora, hoy });
+  if (previa.accion) return reusar(ctx, deps, previa.accion, { pedido, firma, textos, libres, ahora, hoy, guarda });
 
   // 4) Topes, antes de gastar Google.
   const conteos = await contarTopes(sb, ctx.conv.id, hoy);
@@ -338,13 +342,39 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
   const fila = filaCotizacionTraslado(r, e, {
     convId: ctx.conv.id, clienteId, atencion: ctx.contacto?.nombre ?? null, config: sim.catalogo.config, firma, hoy,
     ahora: new Date(ahora).toISOString(), plantilla: pt.plantilla, ...(idiomaFila === "en" ? { idioma: idiomaFila } : {}),
+    // Lo que no se imprime es lo mismo que deja en revisión: con el cliente en inglés (aunque el inglés esté apagado), castellano ∪ inglés.
+    ...(guarda === "en" && idiomaFila !== "en" ? { guarda } : {}),
   });
   const ins = await insertarCotizacion(sb, fila);
   if (!ins.ok) return deriva(ins.motivo, pedido, ins.detalle);
   const guardada: Record<string, unknown> = { ...fila };
   for (const c of ins.sueltas) delete guardada[c];
   const leida: FilaCotizacionLeida = { ...(guardada as FilaCotizacion), id: ins.id, numero_cotizacion: ins.numero, created_at: ins.created_at, ...(ins.condiciones_token ? { condiciones_token: ins.condiciones_token } : {}) };
-  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo: sim.catalogo, firma, textos, libres, pedido, nota: r.explicacion.join("\n") });
+  // La HUELLA de lo que se imprime, sobre la fila LEÍDA de la base (la misma lectura con que se
+  // compara al reusarla): queda en la acción. Si no se puede leer, la acción nace sin huella y, si
+  // este pedido se reusa, irá a revisión (`editada_a_mano`): no se puede comprobar.
+  let huella: string | null = null;
+  try {
+    const releida = await leerCotizacionTraslado(sb, ins.id);
+    huella = releida ? huellaImprimible(releida) : null;
+  } catch { huella = null; }
+  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo: sim.catalogo, firma, textos, libres, pedido, nota: r.explicacion.join("\n"), guarda, huella });
+}
+
+/** El sha256 (hex) de lo que imprime la fila (`canonImprimible`): la huella que queda en la acción al crearla. */
+export function huellaImprimible(fila: FilaCotizacionLeida): string {
+  return createHash("sha256").update(canonImprimible(fila)).digest("hex");
+}
+
+/**
+ * ¿La fila ya no es la que escribió la IA? La huella guardada en la acción al CREARLA contra la de la
+ * fila de ahora. Una acción sin huella (de antes de este cambio, o cuya fila no se pudo releer al
+ * crearla) tampoco se puede comprobar: cuenta como editada. PURA salvo el hash.
+ */
+export function filaEditada(payload: Record<string, unknown> | null | undefined, fila: FilaCotizacionLeida): boolean {
+  const guardada = payload && typeof payload === "object" ? (payload as { huella?: unknown }).huella : undefined;
+  if (typeof guardada !== "string" || !/^[0-9a-f]{64}$/.test(guardada)) return true;
+  return guardada !== huellaImprimible(fila);
 }
 
 /**
@@ -380,7 +410,7 @@ function camposLibres(e: EntradaSimulador, nombre: string | null): CampoLibre[] 
 /** El mismo pedido otra vez: se reusa la cotización (y se vuelve a decidir el envío), se recuerda la enviada, o se deriva. */
 async function reusar(
   ctx: CtxCotizarIA, deps: DepsCotizar, acc: AccionFila,
-  x: { pedido: string; firma: string; textos: string[] | null; libres: CampoLibre[]; ahora: number; hoy: string },
+  x: { pedido: string; firma: string; textos: string[] | null; libres: CampoLibre[]; ahora: number; hoy: string; guarda: IdiomaTexto },
 ): Promise<ResultadoCotizarIA> {
   const { sb } = ctx;
   if (acc.estado === "rechazada") return deriva("Un ejecutivo rechazó hace poco una cotización de este mismo pedido", x.pedido);
@@ -411,7 +441,10 @@ async function reusar(
   }
   const igv = await leerIgvPct(sb);
   const r = resultadoDeFila(leida, catalogo, igv);
-  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo, firma: x.firma, textos: x.textos, libres: x.libres, pedido: x.pedido, nota: "", existente: acc });
+  // ¿La fila sigue siendo la que escribió la IA? Si alguien la editó (o no se puede comprobar), la
+  // envía un ejecutivo (`editada_a_mano`): el PDF imprime la fila tal cual.
+  const editada = filaEditada(acc.payload, leida);
+  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo, firma: x.firma, textos: x.textos, libres: x.libres, pedido: x.pedido, nota: "", existente: acc, guarda: x.guarda, editada });
 }
 
 /** PDF, cuadre, decisión de envío, acción de la bandeja y nota interna. Compartido por la cotización nueva y la reusada. */
@@ -420,12 +453,20 @@ async function decidirYRegistrar(
   x: {
     leida: FilaCotizacionLeida; resultado: ResultadoTraslado | null; catalogo: Pick<CatalogoTraslados, "config" | "zonas">;
     firma: string; textos: string[] | null; libres: CampoLibre[]; pedido: string; nota: string; existente?: AccionFila;
+    /** El idioma de las guardas (`idiomaDeGuarda`): el de la fila o el del cliente si escribe en inglés u otro idioma. */
+    guarda?: IdiomaTexto;
+    /** Al CREAR: la huella de la fila releída, para el payload de la acción (null = no se pudo releer). */
+    huella?: string | null;
+    /** Al REUSAR: la fila ya no es la que escribió la IA (o no se puede comprobar). */
+    editada?: boolean;
   },
 ): Promise<ResultadoCotizarIA> {
   const { sb } = ctx;
   const numero = numeroCotizacion(x.leida);
   // El idioma lo dice la FILA (se escribió al crearla): aquí no se vuelve a detectar nada.
   const idioma = normalizarIdioma(x.leida.idioma_pdf);
+  // La guarda: castellano ∪ inglés con la fila en inglés o el cliente escribiendo en inglés u otro idioma.
+  const guarda: IdiomaTexto = idioma === "en" || x.guarda === "en" ? "en" : "es";
 
   // El perfil (para el PDF y para saber si está configurado) y el PDF. Ninguno de los dos lanza aquí.
   let perfil: PerfilPdf | null = null;
@@ -454,7 +495,7 @@ async function decidirYRegistrar(
       resultado: x.resultado, envioMaestro: x.catalogo.config.envio_automatico === true, zonas: x.catalogo.zonas,
       canal: ctx.remitente.canal, waId: ctx.remitente.waId, modoAuto: ctx.modoAuto,
       perfilConfigurado: !!perfil && !empresa.sinConfigurar, cuadra: cuadraConMotor(x.leida, x.resultado),
-      pdfOk: !!pdf, palabras, textosLibres: x.libres.map((c) => c.texto), ...(idioma === "en" ? { idioma } : {}),
+      pdfOk: !!pdf, palabras, textosLibres: x.libres.map((c) => c.texto), ...(guarda === "en" ? { idioma: guarda } : {}),
     });
     decision = plan.decision;
     motivos = plan.motivos;
@@ -469,12 +510,20 @@ async function decidirYRegistrar(
   // condiciones que no salieron de una plantilla en inglés (`condiciones_en_otro_idioma`).
   const porPdf = revisionPorCondiciones({ avisosPdf: pdf?.avisos ?? null, consideraciones: x.leida.consideraciones_json, idiomaPdf: x.leida.idioma_pdf });
   for (const m of porPdf.motivos) if (!motivos.includes(m)) motivos.push(m);
+  // El RESPALDO sobre la fila (revisión de seguridad): el recojo, el destino y las descripciones TAL
+  // COMO SE IMPRIMEN. Lo que escribió la IA nunca es sospechoso; lo que alguien editó, puede.
+  const impresos = impresosSospechosos(x.leida, guarda);
+  if (impresos.length && !motivos.includes("texto_libre_sospechoso")) motivos.push("texto_libre_sospechoso");
+  // Al REUSAR, una fila que ya no es la que escribió la IA la envía un ejecutivo.
+  if (x.editada === true && !motivos.includes("editada_a_mano")) motivos.push("editada_a_mano");
   if (motivos.length > 0) decision = "revision";
 
   // La acción de la bandeja: nueva, o la misma con la decisión de ahora.
   let accionId = x.existente?.id;
   // El idioma va en la tarjeta solo si es inglés (la bandeja lo pinta); en castellano, el payload de siempre.
   const datos = { cotizacion_id: x.leida.id, numero, firma: x.firma, decision, motivos, ...(idioma === "en" ? { idioma } : {}) };
+  // La huella va SOLO al crear la acción: al reusarla se conserva la de su creación (si se volviera
+  // a escribir, una fila editada pasaría a ser «la de la IA» en el siguiente reuso).
   if (x.existente) {
     const { error } = await sb.from("crm_acciones_ia")
       .update({ payload: { ...(x.existente.payload ?? {}), ...datos, redecidida_at: new Date(deps.ahoraMs?.() ?? Date.now()).toISOString() } })
@@ -484,7 +533,7 @@ async function decidirYRegistrar(
     const resumen = resumenAccion(x.leida, numero, decision);
     const { data, error } = await sb.from("crm_acciones_ia").insert({
       conversacion_id: ctx.conv.id, contacto_id: ctx.contacto?.id ?? null, tipo: "cotizacion_traslado", resumen,
-      payload: datos, estado: "pendiente", resultado_tipo: "cotizaciones", resultado_id: x.leida.id,
+      payload: x.huella ? { ...datos, huella: x.huella } : datos, estado: "pendiente", resultado_tipo: "cotizaciones", resultado_id: x.leida.id,
     }).select("id").single();
     if (error || !data) {
       return deriva(
@@ -502,7 +551,8 @@ async function decidirYRegistrar(
         `🤖 La IA cotizó un traslado y lo dejó para que lo revises: cotización N° ${numero}.`,
         ...motivos.map((m) => `• ${MOTIVO_REVISION[m].texto} ${MOTIVO_REVISION[m].arreglo}`),
         ...(idioma === "en" ? ["• La cotización va en INGLÉS (el cliente escribe en inglés u otro idioma): el PDF y los mensajes del sistema le llegan en inglés."] : []),
-        ...textosLibresSospechosos(x.libres, idioma).map((c) => `  – ${c.campo}: ${ETIQUETA_TEXTO_LIBRE[c.motivo]}.`),
+        ...textosLibresSospechosos(x.libres, guarda).map((c) => `  – ${c.campo}: ${ETIQUETA_TEXTO_LIBRE[c.motivo]}.`),
+        ...impresos.map((c) => `  – ${c.campo}: ${ETIQUETA_TEXTO_LIBRE[c.motivo]}.`),
         ...porPdf.lineas.map((c) => `  – Condición del PDF («${NOMBRE_LISTA[c.lista]}»): «${recortar(c.linea, 160)}» ${c.motivos.map((m) => ETIQUETA_TEXTO_LIBRE[m]).join(" y ")}.`),
         errorPdf ? `• PDF: ${errorPdf.slice(0, 300)}` : "",
         // Lo que el PDF no pudo poner (no bloquea el envío; aquí solo se dice).

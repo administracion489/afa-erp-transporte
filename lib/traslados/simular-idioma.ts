@@ -35,7 +35,10 @@ export function mensajesDelCuerpo(cuerpo: unknown): { ok: true; mensajes: string
   if (v == null) return { ok: true, mensajes: null };
   if (!Array.isArray(v) || v.some((m) => typeof m !== "string")) return { ok: false, detalle: "«mensajes_cliente» tiene que ser una lista de textos." };
   if (v.length > MAX_MENSAJES_CLIENTE) return { ok: false, detalle: `Como mucho ${MAX_MENSAJES_CLIENTE} mensajes del cliente.` };
-  return { ok: true, mensajes: (v as string[]).map((m) => Array.from(m).slice(0, MAX_CARACTERES_MENSAJE).join("")).filter((m) => m.trim()) };
+  // Se corta ANTES de partir en caracteres: `Array.from` sobre un texto entero de megas haría el trabajo
+  // (y la memoria) de todo el texto para quedarse con 500. 2 × el tope en unidades UTF-16 contiene al
+  // menos el tope en caracteres completos (un carácter ocupa una o dos).
+  return { ok: true, mensajes: (v as string[]).map((m) => Array.from(m.slice(0, 2 * MAX_CARACTERES_MENSAJE)).slice(0, MAX_CARACTERES_MENSAJE).join("")).filter((m) => m.trim()) };
 }
 
 const NOMBRE_CLIENTE: Record<IdiomaCliente, string> = { es: "castellano", en: "inglés", otro: "otro idioma" };

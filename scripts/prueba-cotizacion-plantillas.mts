@@ -692,6 +692,10 @@ console.log("17. La regla del traslado por idioma × moneda (cotizaciones-09) y 
       if (c.idioma === "es" && u.plantilla && !P.sirveParaIA(u.plantilla)) inv.push("en castellano, una que no sirve en castellano");
       if (u.codigo === "sin_plantilla_idioma" && (c.idioma !== "en" || u.idiomaCondiciones !== "es")) inv.push("sin_plantilla_idioma solo en inglés y con condiciones en castellano");
       if (u.codigo !== "sin_plantilla_idioma" && u.plantilla && u.idiomaCondiciones !== c.idioma) inv.push("el idioma de las condiciones es el de la celda");
+      // Revisión S1 (hallazgo 4): en inglés NUNCA se cae a la principal. Solo la celda asignada o la
+      // caída declarada al castellano de la misma moneda; nunca una plantilla en inglés que la celda no nombra.
+      if (c.idioma === "en" && u.codigo !== "regla" && u.codigo !== "sin_plantilla_idioma") inv.push("en inglés, un código que no es regla ni sin_plantilla_idioma (la principal)");
+      if (c.idioma === "en" && u.codigo !== "regla" && u.plantilla && P.sirveParaIA(u.plantilla, "en")) inv.push("en inglés, una plantilla inglesa que la celda no asignó (la principal)");
       if ((u.plantilla === null) !== (u.codigo === "sin_plantilla" || (u.codigo === "sin_plantilla_idioma" && P.plantillaTrasladoIA({ idioma: "es", moneda: c.moneda }, pls, reglas, { reglas: null, segmento: "particular" }).plantilla === null))) inv.push("null ⟺ sin_plantilla (o su caída en inglés)");
       const celda = reglas.find(x => x.idioma === c.idioma && x.moneda === c.moneda);
       const pc = celda ? pls.find(x => x.id === celda.plantilla_id) : null;
@@ -715,8 +719,22 @@ console.log("17. La regla del traslado por idioma × moneda (cotizaciones-09) y 
   ok(enOkU.codigo === "regla" && enOkU.plantilla?.id === "trf_en" && enOkU.idiomaCondiciones === "en", "inglés con su plantilla en inglés → regla");
   const enNoSirve = P.plantillaTrasladoIA({ idioma: "en", moneda: "PEN" }, pls, [{ idioma: "en", moneda: "PEN", plantilla_id: "traslados_ia" }], { reglas: null, segmento: "particular" });
   ok(enNoSirve.codigo === "sin_plantilla_idioma" && enNoSirve.plantilla?.id === "corporativo", "una celda «inglés» con una plantilla en castellano no se obedece: cae a castellano y lo dice");
+  // DIVERGENCIA DECLARADA (revisión de seguridad S1, hallazgo 4, 23-10-2026). Antes: «inglés sin regla,
+  // con la principal en inglés → la principal» (`principal`, trf_en, condiciones en inglés): la cotización
+  // en soles salía SOLA con las condiciones de la principal mientras Ajustes decía «queda en revisión» e
+  // `inglesDisponible` decía que la principal no enciende el inglés. Ahora en inglés nunca se cae a la
+  // principal: `sin_plantilla_idioma`, la celda castellano de la misma moneda (aquí sin plantilla que sirva:
+  // las listas de Ajustes, en castellano) y la cotización queda en revisión (`condiciones_en_otro_idioma`).
   const principalEn = P.plantillaTrasladoIA({ idioma: "en", moneda: "PEN" }, PLS[2], [], { reglas: null, segmento: "particular" });
-  ok(principalEn.codigo === "principal" && principalEn.plantilla?.id === "trf_en", "inglés sin regla, con la principal en inglés: la principal");
+  ok(principalEn.codigo === "sin_plantilla_idioma" && principalEn.plantilla === null && principalEn.idiomaCondiciones === "es"
+    && principalEn.detalle.includes("en inglés no se usa la plantilla principal") && principalEn.detalle.includes(" No hay una plantilla en inglés que la IA pueda usar."),
+    `inglés sin regla, con la principal en inglés: NO la principal, la caída al castellano declarada (${principalEn.codigo}: ${principalEn.detalle})`);
+  const principalEnUsd = P.plantillaTrasladoIA({ idioma: "en", moneda: "USD" }, PLS[1].map(x => x.id === "trf_en" ? { ...x, es_principal: true } : { ...x, es_principal: false }), [{ idioma: "es", moneda: "USD", plantilla_id: "traslados_ia" }], { reglas: null, segmento: "extranjero" });
+  ok(principalEnUsd.codigo === "sin_plantilla_idioma" && principalEnUsd.plantilla?.id === "traslados_ia" && principalEnUsd.idiomaCondiciones === "es",
+    "inglés sin regla, con una principal en inglés y la celda castellano asignada: la de castellano (en revisión), nunca la principal inglesa");
+  const rotaEn = P.plantillaTrasladoIA({ idioma: "en", moneda: "USD" }, PLS[2], [{ idioma: "en", moneda: "USD", plantilla_id: "fantasma" }], { reglas: null, segmento: "extranjero" });
+  ok(rotaEn.codigo === "sin_plantilla_idioma" && rotaEn.plantilla?.id !== "trf_en" && rotaEn.detalle.includes("«fantasma», que ya no existe"),
+    `inglés con la celda rota y la principal en inglés: tampoco la principal, y dice por qué no se obedeció la celda (${rotaEn.detalle})`);
   const esSin = P.plantillaTrasladoIA({ idioma: "es", moneda: "PEN" }, PLS[4], [], { reglas: null, segmento: "particular" });
   ok(esSin.codigo === "sin_plantilla" && esSin.plantilla === null && esSin.idiomaCondiciones === null && esSin.detalle.includes("Ajustes de traslados"), "castellano sin plantilla que sirva: las de Ajustes, como hoy");
 
@@ -804,9 +822,16 @@ console.log("18. Pantalla: la cuadrícula del traslado por idioma × moneda (com
   ok(tonos === n, `el tono: gris = «inglés» apagada y vacía; ámbar = regla que no se obedece, sin plantilla, en revisión, o «inglés» apagada con regla (${tonos}/${n})`);
   ok(okBien === n, `nunca «ok» sin una plantilla que de verdad se usa (${okBien}/${n})`);
   ok(motivoOk === n, `una regla en una celda «inglés» apagada nombra por qué la IA no la puede usar (${motivoOk}/${n})`);
+  // Revisión S1 (hallazgo 4, DECLARADO): en inglés ya no se cae a la principal, así que «en:ok:principal»,
+  // «en:ambar:regla_inactiva», «en:ambar:regla_no_sirve_ia» y «en:gris:principal» (que eran la caída a una
+  // principal en inglés) dejaron de existir: en inglés solo hay «regla» o «sin_plantilla_idioma», con el
+  // porqué de la celda dentro del detalle.
   for (const v of ["es:ok:regla", "es:ok:principal", "es:ambar:regla_inactiva", "es:ambar:regla_no_sirve_ia", "es:ambar:sin_plantilla",
-    "en:ok:regla", "en:ok:principal", "en:ambar:sin_plantilla_idioma", "en:ambar:regla_inactiva", "en:ambar:regla_no_sirve_ia", "en:gris:sin_plantilla_idioma", "en:gris:principal"]) {
+    "en:ok:regla", "en:ambar:sin_plantilla_idioma", "en:gris:sin_plantilla_idioma"]) {
     ok(vistos.has(v), `el barrido produce ${v}`);
+  }
+  for (const v of [...vistos].filter(x => x.startsWith("en:"))) {
+    ok(/:(regla|sin_plantilla_idioma)$/.test(v), `en inglés solo «regla» o «sin_plantilla_idioma», nunca la principal (${v})`);
   }
 
   // (b) Los textos que pide el plan, literales.

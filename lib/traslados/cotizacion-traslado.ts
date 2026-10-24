@@ -53,7 +53,7 @@ import { considSnapshot, type PlantillaFila } from "../cotizacion-plantillas";
 import { MAX_DESCRIPCION_RENGLONES, MAX_RENGLONES_DESCRIPCION, type VehiculoPDF } from "../pdf-chrome";
 import { empresaConDefectos, type CuentaBancaria, type EmpresaResuelta, type PerfilEmpresa } from "../empresa-perfil";
 import { fechaLima } from "../alertas-horario";
-import { atencionImprimible, referenciaImprimible } from "./texto-libre";
+import { atencionImprimible, referenciaImprimible, textoLibreSospechoso, type IdiomaTexto, type MotivoTextoLibre } from "./texto-libre";
 import { urlFotoPermitida, type LadoFoto } from "./fotos-categoria";
 import { mismoTelefonoE164 } from "../crm-telefono";
 
@@ -228,9 +228,10 @@ const textoLugar = (l: LugarEntrada): string =>
  * lo del cliente es sospechoso (un enlace, un teléfono, un importe, palabras de pago, más de 80
  * caracteres), no se imprime: queda solo la zona y la cotización va a revisión (planEnvio).
  */
-function nombreLugar(l: LugarEntrada, z: Zona, idioma: Idioma = "es"): string {
+function nombreLugar(l: LugarEntrada, z: Zona, idioma: Idioma = "es", guarda: IdiomaTexto = idioma): string {
   if (z.tipo === "punto") return z.nombre.slice(0, MAX_LUGAR);
-  const ref = referenciaImprimible(textoLugar(l), idioma);
+  // La GUARDA puede ir en inglés aunque la fila no (`idiomaDeGuarda`): lo que no se imprime es lo mismo que deja en revisión.
+  const ref = referenciaImprimible(textoLugar(l), idioma === "en" || guarda === "en" ? "en" : "es");
   if (ref) return claveNombre(ref) === claveNombre(z.nombre) ? z.nombre.slice(0, MAX_LUGAR) : `${z.nombre} (${ref})`.slice(0, MAX_LUGAR);
   if (typeof l !== "string") return `${z.nombre} (${idioma === "en" ? "shared location" : "ubicación compartida"})`.slice(0, MAX_LUGAR);
   return z.nombre.slice(0, MAX_LUGAR);
@@ -251,11 +252,17 @@ const recortar = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0
  * y la referencia «(shared location)» van en inglés, los textos libres se juzgan con los guards de
  * castellano ∪ inglés, y `idioma_pdf` es «en». Sin él, castellano byte a byte. La evidencia
  * (`e.idioma_cliente`) queda en `traslado_json` para la nota del ejecutivo.
+ *
+ * `guarda` (opcional, revisión S1): el idioma de los guards del texto libre cuando no es el de la fila
+ * (`idiomaDeGuarda`: el cliente escribe en inglés u otro idioma con el inglés APAGADO). Con «en», la
+ * referencia del cliente y la atención se juzgan con castellano ∪ inglés —lo mismo con que `planEnvio`
+ * las deja en revisión, para que lo sospechoso tampoco se IMPRIMA—; lo demás de la fila no cambia (y
+ * como inglés ⊇ castellano, un texto limpio se imprime igual).
  */
 export function filaCotizacionTraslado(
   r: ResultadoTraslado,
   e: EntradaSimulador,
-  x: { convId: string; clienteId: number | null; atencion: string | null; config: ConfigTraslados; firma: string; hoy: string; ahora?: string; plantilla?: PlantillaFila | null; idioma?: Idioma },
+  x: { convId: string; clienteId: number | null; atencion: string | null; config: ConfigTraslados; firma: string; hoy: string; ahora?: string; plantilla?: PlantillaFila | null; idioma?: Idioma; guarda?: IdiomaTexto },
 ): FilaCotizacion {
   const p = r.precio;
   const cat = r.vehiculo?.categoria;
@@ -268,8 +275,9 @@ export function filaCotizacionTraslado(
   if (precioUnitPen == null) throw new Error("Cotización en dólares sin tipo de cambio: no se puede guardar en soles.");
   const sentido: "ida" | "ida_retorno" = p.tramos === 2 ? "ida_retorno" : "ida";
   const idioma: Idioma = x.idioma === "en" ? "en" : "es";
-  const origen = nombreLugar(e.origen, zo, idioma);
-  const destino = nombreLugar(e.destino, zd, idioma);
+  const guarda: IdiomaTexto = idioma === "en" || x.guarda === "en" ? "en" : "es";
+  const origen = nombreLugar(e.origen, zo, idioma, guarda);
+  const destino = nombreLugar(e.destino, zd, idioma, guarda);
   const descripcion = recortar(
     idioma === "en"
       ? `TRANSFER ${sentido === "ida_retorno" ? "ROUND TRIP" : "ONE WAY"} · ${origen} – ${destino} · ${cat.nombre} (up to ${cat.capacidad} passengers) · price per leg`
@@ -306,7 +314,7 @@ export function filaCotizacionTraslado(
     // Interno: lo lee el ejecutivo en /cotizaciones y no se imprime. Va en castellano siempre.
     asunto: "Traslado cotizado por la IA (WhatsApp)",
     // Hasta 60 caracteres y nunca algo sospechoso (lo juzga también planEnvio).
-    atencion: atencionImprimible(x.atencion, idioma),
+    atencion: atencionImprimible(x.atencion, guarda),
     numero_cotizacion: null,
     crm_conversacion_id: x.convId,
     traslado_json: {
@@ -811,4 +819,86 @@ export function captionDocumento(cot: Pick<FilaCotizacionLeida, "id" | "numero_c
   const de = empresa.sinConfigurar ? "" : ` · ${empresa.nombre}`;
   const titulo = idiomaDe(cot) === "en" ? "Quotation No." : "Cotización N°";
   return recortar(`${titulo} ${numeroCotizacion(cot)}${ruta ? ` · ${ruta}` : ""}${de}`, 1000);
+}
+
+// ── 6. La HUELLA de lo que se imprime (revisión de seguridad, 23-10-2026) ──────
+// Cuando la IA REUSA una cotización pendiente (el mismo pedido otra vez), la fila pudo haberla
+// EDITADO un usuario del ERP entretanto —desde /cotizaciones, o directo por PostgREST—: el recojo, el
+// destino, la descripción del ítem, las condiciones (con la marca `idioma: "en"`), las fechas. Nada lo
+// volvía a juzgar: `planEnvio` mira el texto del turno, `cuadraConMotor` los importes y
+// `revisionPorCondiciones` los enlaces y números largos, y el PDF imprime la fila tal cual. Por eso la
+// IA guarda, AL CREARLA, la huella (sha256 de `canonImprimible`, la calcula el servidor) en el
+// `payload` de su acción de `crm_acciones_ia` —que solo escribe el servidor (traslados-06): la fila
+// misma no sirve, la puede reescribir el mismo usuario— y al reusarla la compara. Distinta, o una
+// acción sin huella (anterior a este cambio): revisión (`editada_a_mano`), nunca envío automático. El
+// botón «Enviar» del ejecutivo en el CRM no mira la huella: ahí decide una persona.
+
+/**
+ * Los campos de la fila que el PDF o el caption IMPRIMEN (o que cambian lo impreso: el cliente, la
+ * plantilla de las cuentas, el enlace a las condiciones, la categoría dentro de `traslado_json`).
+ * El estado no: lo cambia el propio envío.
+ */
+export const CAMPOS_HUELLA = [
+  "numero_cotizacion", "created_at", "cliente_id", "origen", "destino", "fecha_servicio", "hora_ida", "fecha_retorno", "hora_retorno",
+  "tipo_servicio", "tipo_vehiculo", "items_json", "incluye_igv", "precio_cliente", "moneda", "tipo_cambio", "idioma_pdf", "atencion",
+  "consideraciones_json", "plantilla_pdf", "condiciones_token", "traslado_json",
+] as const;
+
+/** JSON con las claves ordenadas a todo nivel (Postgres reordena las de un jsonb) y sin `undefined`. */
+function canon(x: unknown): unknown {
+  if (Array.isArray(x)) return x.map((e) => (e === undefined ? null : canon(e)));
+  if (x && typeof x === "object") {
+    const o: Record<string, unknown> = {};
+    for (const k of Object.keys(x as Record<string, unknown>).sort()) {
+      const val = (x as Record<string, unknown>)[k];
+      if (val !== undefined) o[k] = canon(val);
+    }
+    return o;
+  }
+  return x;
+}
+
+/** Un número de una columna numeric, venga como número o como texto («283.20» = 283.2); lo demás, tal cual. */
+const comoNumero = (x: unknown): unknown => {
+  if (typeof x === "string" && x.trim() !== "" && Number.isFinite(Number(x))) return Number(x);
+  return x;
+};
+
+/**
+ * Lo que se le saca la huella: los `CAMPOS_HUELLA` de la fila, LEÍDA de la base (la misma lectura al
+ * crear y al reusar: `leerCotizacionTraslado`), en JSON canónico. Un campo ausente (una columna
+ * accesoria sin su migración) cuenta como null. PURO: el sha256 lo calcula el servidor.
+ */
+export function canonImprimible(fila: Partial<Record<(typeof CAMPOS_HUELLA)[number], unknown>> | null | undefined): string {
+  const f = (fila ?? {}) as Record<string, unknown>;
+  const o: Record<string, unknown> = {};
+  for (const k of CAMPOS_HUELLA) {
+    const val = f[k] ?? null;
+    o[k] = k === "precio_cliente" || k === "tipo_cambio" || k === "cliente_id" ? comoNumero(val) : val;
+  }
+  return JSON.stringify(canon(o));
+}
+
+/**
+ * El RESPALDO sobre la fila antes de un envío automático: el recojo, el destino y la descripción de
+ * cada ítem TAL COMO SE IMPRIMEN, juzgados con `textoLibreSospechoso` en el idioma de la guarda
+ * (castellano ∪ inglés con «en»). El largo no cuenta: el código los arma con el nombre de la zona, la
+ * categoría y la referencia del cliente, y pasan de 80 caracteres con toda normalidad. Lo que la IA
+ * escribió al crearla nunca es sospechoso (lo sospechoso no se imprime); lo que alguien editó, puede.
+ */
+export function impresosSospechosos(
+  fila: Pick<FilaCotizacionLeida, "origen" | "destino" | "items_json"> | null | undefined,
+  idioma: IdiomaTexto = "es",
+): { campo: string; motivo: MotivoTextoLibre }[] {
+  if (!fila) return [];
+  const out: { campo: string; motivo: MotivoTextoLibre }[] = [];
+  const mirar = (campo: string, t: unknown) => {
+    const m = textoLibreSospechoso(typeof t === "string" ? t : t == null ? "" : String(t), idioma);
+    if (m && m !== "muy_largo") out.push({ campo, motivo: m });
+  };
+  mirar("Recojo impreso", fila.origen);
+  mirar("Destino impreso", fila.destino);
+  const items = Array.isArray(fila.items_json) ? (fila.items_json as { descripcion?: unknown }[]) : [];
+  items.forEach((it, i) => mirar(items.length > 1 ? `Descripción del ítem ${i + 1}` : "Descripción del ítem", it?.descripcion));
+  return out;
 }
