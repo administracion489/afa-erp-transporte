@@ -11,7 +11,8 @@ import { TIPOS_AUTO, type ArchivoRef, type Bloque, type BloqueResuelto, type Hal
 import type { ValoresVariables } from "@/lib/licitaciones/texto";
 import { Boton, BotonIcono, CampoTexto, Campo, Interruptor, TextoVista, TopeAlcanzado, claseInput } from "./comun";
 import EditorTabla from "./EditorTabla";
-import { Asa, useOrdenable } from "./ordenable";
+import { useSortable } from "@dnd-kit/sortable";
+import { Asa, estiloOrdenable } from "./ordenable";
 import { INFO_AUTO, INFO_BLOQUE, LIM, ORDEN_TIPOS } from "./bloques";
 
 export type VistaAuto = { estado: "cargando" } | { estado: "error"; detalle: string } | { estado: "ok"; bloques: BloqueResuelto[] };
@@ -78,17 +79,17 @@ export type PropsBloque = {
 
 export default function EditorBloque(p: PropsBloque) {
   const { bloque: b, soloLectura } = p;
-  const ord = useOrdenable(b.id, soloLectura);
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: b.id, disabled: soloLectura });
   const [menu, setMenu] = useState(false);
   const info = INFO_BLOQUE[b.tipo];
   const nombre = b.tipo === "auto" ? `Tabla automática · ${INFO_AUTO[b.auto].nombre}` : info.nombre;
   const abiertos = p.hallazgos.filter((h) => !h.aceptado);
 
   return (
-    <div ref={ord.ref} style={ord.style} id={p.domId}
-      className={`min-w-0 scroll-mt-24 rounded-xl border bg-white transition-shadow ${p.resaltado ? "border-amber-400 ring-2 ring-amber-300" : "border-gray-200"} ${ord.arrastrando ? "shadow-lg" : ""}`}>
+    <div ref={setNodeRef} style={estiloOrdenable({ transform, transition, isDragging })} id={p.domId}
+      className={`min-w-0 scroll-mt-24 rounded-xl border bg-white transition-shadow ${p.resaltado ? "border-amber-400 ring-2 ring-amber-300" : "border-gray-200"} ${isDragging ? "shadow-lg" : ""}`}>
       <div className="flex items-center gap-1 border-b border-gray-100 px-1.5 py-1">
-        {!soloLectura ? <Asa props={ord.asa} etiqueta={nombre} /> : null}
+        {!soloLectura ? <Asa atributos={attributes} escuchas={listeners} etiqueta={nombre} /> : null}
         <span className="w-5 shrink-0 text-center text-xs text-gray-400">{info.icono}</span>
         <span className="min-w-0 flex-1 truncate text-xs font-semibold text-gray-600">
           {nombre}{p.numero ? <span className="ml-1 font-mono text-[#0b315f]">{p.numero}</span> : null}

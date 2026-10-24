@@ -6,7 +6,8 @@
 import { useState } from "react";
 import { TOPES_DOC, type DocLicitacion, type Seccion } from "@/lib/licitaciones/tipos";
 import { Boton, TopeAlcanzado } from "./comun";
-import { Asa, ContenedorOrdenable, useOrdenable } from "./ordenable";
+import { useSortable } from "@dnd-kit/sortable";
+import { Asa, ContenedorOrdenable, estiloOrdenable } from "./ordenable";
 import { NOMBRE_PANEL, PANELES_INICIO, panelActivo, type PanelPreliminar } from "./Preliminares";
 
 export type Seleccion = { tipo: "panel"; panel: PanelPreliminar } | { tipo: "seccion"; id: string };
@@ -97,11 +98,11 @@ export default function ListaSecciones(p: Props) {
 }
 
 function ItemSeccion({ s, numero, activo, elegir, cuenta, soloLectura }: { s: Seccion; numero: string | null; activo: boolean; elegir: () => void; cuenta: Cuenta; soloLectura: boolean }) {
-  const ord = useOrdenable(s.id, soloLectura);
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: s.id, disabled: soloLectura });
   return (
-    <li ref={ord.ref} style={ord.style} className={ord.arrastrando ? "rounded-lg bg-white shadow-md" : ""}>
+    <li ref={setNodeRef} style={estiloOrdenable({ transform, transition, isDragging })} className={isDragging ? "rounded-lg bg-white shadow-md" : ""}>
       <div className={`flex min-h-9 items-center rounded-lg ${activo ? "bg-[#0b315f] text-white" : "text-gray-700 hover:bg-gray-100"}`}>
-        {!soloLectura ? <span className={activo ? "text-white/60" : ""}><Asa props={ord.asa} etiqueta={`la sección «${s.titulo || "sin título"}»`} /></span> : <span className="w-2" />}
+        {!soloLectura ? <span className={activo ? "text-white/60" : ""}><Asa atributos={attributes} escuchas={listeners} etiqueta={`la sección «${s.titulo || "sin título"}»`} /></span> : <span className="w-2" />}
         <button type="button" onClick={elegir} aria-current={activo ? "true" : undefined} className="flex min-w-0 flex-1 items-center gap-1.5 py-1.5 pr-2 text-left text-sm">
           <span className={`w-6 shrink-0 font-mono text-xs ${activo ? "text-white/80" : "text-gray-400"}`}>{numero ? `${numero}.` : "—"}</span>
           <span className={`min-w-0 truncate ${s.activa ? "" : `line-through ${activo ? "text-white/60" : "text-gray-400"}`} ${s.titulo ? "" : "italic"}`}>{s.titulo || "Sección sin título"}</span>

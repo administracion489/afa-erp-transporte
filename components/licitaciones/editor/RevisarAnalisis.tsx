@@ -101,9 +101,8 @@ export default function RevisarAnalisis({ r, lic, doc, cambiarDoc, cambiarColumn
     return existe ? "duplicado" : "nuevo";
   };
   const [marcReq, setMarcReq] = useState<Set<string> | null>(null);
-  const porDefectoReq = useMemo(() => new Set(a.requisitos.filter((p) => p.obligatorio && estadoReq(p) === "nuevo").map((p) => p.clave)),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [a.requisitos]);
+  // Por defecto: los OBLIGATORIOS que todavía no están en la lista.
+  const porDefectoReq = new Set(a.requisitos.filter((p) => p.obligatorio && estadoReq(p) === "nuevo").map((p) => p.clave));
   const marcadosReq = marcReq ?? porDefectoReq;
   const [verDescartados, setVerDescartados] = useState(false);
   const elegiblesReq = a.requisitos.filter((p) => marcadosReq.has(p.clave) && estadoReq(p) !== "agregado" && estadoReq(p) !== "descartado");
@@ -144,9 +143,7 @@ export default function RevisarAnalisis({ r, lic, doc, cambiarDoc, cambiarColumn
     return existe ? "duplicado" : "nuevo";
   };
   const [marcCon, setMarcCon] = useState<Set<string> | null>(null);
-  const porDefectoCon = useMemo(() => new Set(a.consultas.filter((c) => estadoCon(c.clave, c.pregunta) === "nuevo").map((c) => c.clave)),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [a.consultas]);
+  const porDefectoCon = new Set(a.consultas.filter((c) => estadoCon(c.clave, c.pregunta) === "nuevo").map((c) => c.clave));
   const marcadosCon = marcCon ?? porDefectoCon;
   const elegiblesCon = a.consultas.filter((c) => marcadosCon.has(c.clave) && estadoCon(c.clave, c.pregunta) !== "agregado");
   const agregarCon = () => {

@@ -127,16 +127,15 @@ export default function PasoContenido(p: PasoProps & { ancla?: string | null }) 
   const selId = seccionSel?.id ?? null;
   const hayAuto = !!seccionSel?.bloques.some((b) => b.tipo === "auto");
   const licDiferida = useDeferredValue(lic);
-  const vistaSeccion = useMemo<VistaAuto | null>(() => {
-    if (!hayAuto || !selId) return null;
-    if (!ctx || !revision) return { estado: "cargando" };
-    try {
-      const d = resolverDocumento(licDiferida, ctx, revision);
-      return { estado: "ok", bloques: d.secciones.find((x) => x.id === selId)?.bloques ?? [] };
-    } catch (e) {
-      return { estado: "error", detalle: e instanceof Error ? e.message : String(e) };
-    }
-  }, [hayAuto, selId, ctx, revision, licDiferida]);
+  const docResuelto = useMemo<{ ok: true; d: ReturnType<typeof resolverDocumento> } | { ok: false; detalle: string } | null>(() => {
+    if (!hayAuto || !ctx || !revision) return null;
+    try { return { ok: true, d: resolverDocumento(licDiferida, ctx, revision) }; }
+    catch (e) { return { ok: false, detalle: e instanceof Error ? e.message : String(e) }; }
+  }, [hayAuto, ctx, revision, licDiferida]);
+  const vistaSeccion: VistaAuto | null = !hayAuto || !selId ? null
+    : !docResuelto ? { estado: "cargando" }
+    : !docResuelto.ok ? { estado: "error", detalle: docResuelto.detalle }
+    : { estado: "ok", bloques: docResuelto.d.secciones.find((x) => x.id === selId)?.bloques ?? [] };
 
   const subirImagen = useCallback((file: File) => subirArchivo("imagenes", lic.id, file), [lic.id]);
 

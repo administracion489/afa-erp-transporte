@@ -5,8 +5,8 @@
 // flechas y Espacio. Los botones ↑ ↓ de cada elemento siguen ahí para el celular y para quien no arrastra.
 
 import { useId, type ReactNode } from "react";
-import { DndContext, KeyboardSensor, PointerSensor, TouchSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
-import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { DndContext, KeyboardSensor, PointerSensor, TouchSensor, closestCenter, useSensor, useSensors, type DragEndEvent, type DraggableAttributes, type DraggableSyntheticListeners } from "@dnd-kit/core";
+import { SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, type useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
 export function ContenedorOrdenable({ ids, mover, children }: { ids: string[]; mover: (de: number, a: number) => void; children: ReactNode }) {
@@ -28,20 +28,18 @@ export function ContenedorOrdenable({ ids, mover, children }: { ids: string[]; m
   );
 }
 
-/** Lo que necesita un elemento ordenable: su ref, su estilo mientras se arrastra y las props del asa. */
-export function useOrdenable(id: string, deshabilitado: boolean) {
-  const s = useSortable({ id, disabled: deshabilitado });
-  return {
-    ref: s.setNodeRef,
-    style: { transform: CSS.Translate.toString(s.transform), transition: s.transition, zIndex: s.isDragging ? 20 : undefined, position: "relative" as const },
-    asa: { ...s.attributes, ...s.listeners },
-    arrastrando: s.isDragging,
-  };
+/**
+ * Estilo de un elemento mientras se arrastra. Cada elemento llama a `useSortable` DIRECTAMENTE (como
+ * TimelineParadasEditable): envuelto en un hook propio, el compilador de React toma el resultado entero
+ * por una ref y prohíbe leerlo al pintar.
+ */
+export function estiloOrdenable(s: Pick<ReturnType<typeof useSortable>, "transform" | "transition" | "isDragging">) {
+  return { transform: CSS.Translate.toString(s.transform), transition: s.transition, zIndex: s.isDragging ? 20 : undefined, position: "relative" as const };
 }
 
-export function Asa({ props, etiqueta }: { props: ReturnType<typeof useOrdenable>["asa"]; etiqueta: string }) {
+export function Asa({ atributos, escuchas, etiqueta }: { atributos: DraggableAttributes; escuchas: DraggableSyntheticListeners; etiqueta: string }) {
   return (
-    <button type="button" {...props} title={`Arrastra para reordenar ${etiqueta}`} aria-label={`Reordenar ${etiqueta}`}
+    <button type="button" {...atributos} {...escuchas} title={`Arrastra para reordenar ${etiqueta}`} aria-label={`Reordenar ${etiqueta}`}
       className="inline-flex h-8 w-6 shrink-0 cursor-grab touch-none items-center justify-center rounded-md text-gray-300 hover:bg-gray-100 hover:text-gray-600 active:cursor-grabbing">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
         <circle cx="9" cy="6" r="1.6" /><circle cx="15" cy="6" r="1.6" />
