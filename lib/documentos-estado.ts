@@ -660,6 +660,40 @@ function hallazgo(
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// FILTRO Y ELECCIÓN DE FILAS — EXTRAÍDOS de evaluarAptitud (no reescritos) para que la
+// licitación (lib/licitaciones/recursos.ts) elija el documento con la MISMA regla.
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Los documentos que aplican a una unidad: los de ESA placa y, en terceros, los generales de la
+ * empresa (`vehiculo_id` NULL) — la regla de app/tercerizadas:203. Una fila nula se ignora (ver la
+ * guarda `!!d` explicada en evaluarAptitud). Es el filtro que vivía inline en evaluarAptitud.
+ */
+export function docsQueAplican<T extends DocFila>(
+  docs: readonly (T | null | undefined)[] | null | undefined,
+  unidad: Pick<UnidadDoc, "id">,
+): T[] {
+  return (docs || []).filter(
+    (d): d is T => !!d && (d.vehiculo_id == null || d.vehiculo_id === unidad.id),
+  );
+}
+
+/**
+ * De varias filas del MISMO tipo (renovaciones acumuladas), la de vencimiento MÁS LEJANO medido
+ * contra `fecha`; a igualdad, o sin fechas, la primera. Una fila sin fecha pierde contra una con
+ * fecha. Es el `mejorDe` que vivía inline en evaluarAptitud. `filas` no puede estar vacía.
+ */
+export function mejorPorVencimiento<T extends { fecha_vencimiento?: string | null }>(filas: readonly T[], fecha: string): T {
+  return filas.reduce((a, b) => {
+    const da = diasEntreFechas(fecha, a.fecha_vencimiento);
+    const db = diasEntreFechas(fecha, b.fecha_vencimiento);
+    if (da === null) return db === null ? a : b;
+    if (db === null) return a;
+    return db > da ? b : a;
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // MOTOR
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -778,9 +812,7 @@ export function evaluarAptitud(e: EntradaAptitud): AptitudServicio {
     // entrada viene de un `select` sin más filtro y una fila nula tumbaba el tick ENTERO con
     // `TypeError: Cannot read properties of null`. Un documento ilegible se ignora; el servicio
     // se sigue evaluando (y si ese tipo era obligatorio, cae solo en "sin registro").
-    const aplican = (e.docsUnidad || []).filter(
-      (d) => !!d && (d.vehiculo_id == null || d.vehiculo_id === uni.id),
-    );
+    const aplican = docsQueAplican(e.docsUnidad, uni);
 
     // Índice tipo canónico → filas. Un mismo tipo puede tener varias filas (renovaciones
     // acumuladas): se toma la de vencimiento MÁS LEJANO, que es la vigente. Quedarse con la
@@ -793,14 +825,7 @@ export function evaluarAptitud(e: EntradaAptitud): AptitudServicio {
       const arr = porTipo.get(t.canonico);
       if (arr) arr.push(d); else porTipo.set(t.canonico, [d]);
     }
-    const mejorDe = (filas: DocFila[]): DocFila =>
-      filas.reduce((a, b) => {
-        const da = diasEntreFechas(fechaServicio, a.fecha_vencimiento);
-        const db = diasEntreFechas(fechaServicio, b.fecha_vencimiento);
-        if (da === null) return db === null ? a : b;
-        if (db === null) return a;
-        return db > da ? b : a;
-      });
+    const mejorDe = (filas: DocFila[]): DocFila => mejorPorVencimiento(filas, fechaServicio);
 
     // Se recorre la LISTA DE OBLIGATORIOS, no las filas existentes: aquí es donde muere el
     // "verde por base vacía" (PROBLEMA 1). Un tipo sin fila produce `sin_registro`, no un

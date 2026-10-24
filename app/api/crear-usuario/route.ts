@@ -21,6 +21,7 @@ const supabaseAdmin = createClient(supabaseUrl, serviceKey, {
 const MODULOS = [
   "dashboard",
   "cotizaciones",
+  "licitaciones",
   "tarifas",
   "clientes",
   "crm",

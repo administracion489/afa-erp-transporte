@@ -7,6 +7,9 @@ import { vencimientoPersona, type PolizaRow, type CoberturaRow, type TipoPersona
 import { leerPolizasPersonas } from "@/lib/seguros-datos";
 import { fechaLima } from "@/lib/documentos-estado";
 import { coincideBusqueda, terminosBusqueda } from "@/lib/busqueda-texto";
+// Categorías de licencia (clasificación MTC): la MISMA lista con que la licitación juzga si la
+// licencia del conductor alcanza para la unidad. Vive en el módulo puro, no aquí.
+import { CATEGORIAS_LIC } from "@/lib/licencias-conducir";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -36,19 +39,6 @@ type Conductor = {
 };
 
 // ─── CONSTANTES ───────────────────────────────────────────────────────────────
-
-// Clasificación oficial MTC — Art. 12 del Reglamento Nacional de Licencias de Conducir.
-// Cada categoría habilita también las anteriores (A-IIb maneja lo de A-IIa y A-I, etc.).
-const CATEGORIAS_LIC = [
-  { valor: "A-I",    desc: "Autos particulares (M1/M2) y carga liviana (N1)" },
-  { valor: "A-IIa",  desc: "Taxi, escolar, turístico y colectivo de pasajeros (M1)" },
-  { valor: "A-IIb",  desc: "Pasajeros (M2) y mercancías (N2)" },
-  { valor: "A-IIIa", desc: "Ómnibus / transporte de pasajeros (M3, +6 t)" },
-  { valor: "A-IIIb", desc: "Carga pesada / camiones (N3)" },
-  { valor: "A-IIIc", desc: "Pasajeros y carga (M3 + N3)" },
-  { valor: "B-I",    desc: "Vehículos no motorizados (3+ ruedas)" },
-  { valor: "B-IIb",  desc: "Motocicletas (L3/L4)" },
-];
 
 const TIPOS_CONTRATO = [
   { valor: "planilla",     label: "Planilla indefinida" },
