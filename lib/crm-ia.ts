@@ -1192,7 +1192,7 @@ async function responderConIAInterno(
     // Tras una reactivación se cuentan solo los turnos posteriores: si no, el hilo que ya llegó al
     // límite se volvería a pausar solo en el siguiente mensaje.
     if (agente.max_turnos_auto > 0) {
-      const desdeTurnos = inicioConteoTurnos(reactivadaAt);
+      const desdeTurnos = inicioConteoTurnos(reactivadaAt, Date.now());
       let qTurnos = sb
         .from("crm_mensajes")
         .select("id", { count: "exact", head: true })

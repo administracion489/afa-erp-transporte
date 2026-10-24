@@ -9,12 +9,15 @@
 //  · un barrido con las invariantes: nunca se usa una fila corregida dentro de la ventana sin una
 //    reactivación posterior (con horas > 0), y la regla coincide con `inicioVentanaHumano` en todo el
 //    barrido — con el corolario: el barrido SÍ produce juicios que dejan usar la fila;
-//  · los textos de las notas: sin cifras de dinero, con las horas en Lima y sin nada para el cliente.
+//  · una reactivación más en el futuro que `MARGEN_RELOJ_REACTIVACION_MS` (5 min) no cuenta (la de
+//    2099 que alguien escribió a mano para saltarse la pausa); dentro del margen, sí;
+//  · los textos de las notas: sin cifras de dinero, con las horas en Lima y sin nada para el cliente; las
+//    de una solicitud que nació «disponibilidad primero» no prometen ninguna hora (la termina el ejecutivo).
 import {
-  CODIGOS_CORRECCION, CORRECCION, SQL_ACTIVIDAD_EJECUTIVO, horaLimaNota, horasDePausa, juzgarCotizacionCorregida, notaEsperaCorreccion,
-  notaSolicitudCorregida, notaUsoCorreccion, puedeUsar, type CodigoCorreccion, type JuicioCorreccion,
+  CODIGOS_CORRECCION, CORRECCION, SQL_ACTIVIDAD_EJECUTIVO, horaLimaNota, horasDePausa, juzgarCotizacionCorregida, notaDisponibilidadCorregida,
+  notaEsperaCorreccion, notaSolicitudCorregida, notaUsoCorreccion, puedeUsar, type CodigoCorreccion, type JuicioCorreccion,
 } from "../lib/traslados/cotizacion-corregida";
-import { HORAS_PAUSA_DEFECTO, horasPausaHumano, inicioVentanaHumano } from "../lib/crm-ia-reactivacion";
+import { HORAS_PAUSA_DEFECTO, MARGEN_RELOJ_REACTIVACION_MS, horasPausaHumano, inicioVentanaHumano } from "../lib/crm-ia-reactivacion";
 import { horasPausaHumano as horasPausaHumanoCrm } from "../lib/crm-ia";
 import { mencionaDinero } from "../lib/traslados/texto-libre";
 
@@ -64,6 +67,16 @@ const J = (x: Partial<Parameters<typeof juzgarCotizacionCorregida>[0]>): JuicioC
   const ed = ahora - H;
   t("reactivación 1 ms después de la corrección → usa", J({ editadaAt: iso(ed), reactivadaAt: iso(ed + 1) }).codigo === "reactivada");
   t("reactivación 1 ms antes → espera", J({ editadaAt: iso(ed), reactivadaAt: iso(ed - 1) }).codigo === "ejecutivo_activo");
+  // Una reactivación en el FUTURO: dentro del margen del reloj cuenta; más allá, no (como si no hubiera).
+  const M = MARGEN_RELOJ_REACTIVACION_MS;
+  t("el margen del reloj es de 5 min", M === 5 * 60_000);
+  t("reactivación en 2099 → ejecutivo_activo (no se salta la pausa)", J({ reactivadaAt: "2099-01-01T00:00:00Z" }).codigo === "ejecutivo_activo");
+  t("reactivación a +6 min → ejecutivo_activo", J({ reactivadaAt: iso(ahora + 6 * 60_000) }).codigo === "ejecutivo_activo");
+  t("reactivación a +4 min (dentro del margen) → reactivada", J({ reactivadaAt: iso(ahora + 4 * 60_000) }).codigo === "reactivada");
+  t("reactivación a +5 min exactos → todavía cuenta; 1 ms más, ya no", J({ reactivadaAt: iso(ahora + M) }).codigo === "reactivada" && J({ reactivadaAt: iso(ahora + M + 1) }).codigo === "ejecutivo_activo");
+  t("con la pausa cumplida, una reactivación futura no cambia nada (sigue pausa_cumplida)", J({ editadaAt: iso(ahora - 13 * H), reactivadaAt: "2099-01-01T00:00:00Z" }).codigo === "pausa_cumplida");
+  t("la ventana del chat también ignora la de 2099 (la de siempre) y cuenta la de +4 min",
+    inicioVentanaHumano(ahora, 12, "2099-01-01T00:00:00Z") === iso(ahora - 12 * H) && inicioVentanaHumano(ahora, 12, iso(ahora + 4 * 60_000)) === iso(ahora + 4 * 60_000));
 }
 
 // ── 3. horasPausaHumano: la misma lectura en los dos módulos ─────────────────
@@ -80,7 +93,7 @@ const J = (x: Partial<Parameters<typeof juzgarCotizacionCorregida>[0]>): JuicioC
   for (const editada of [false, true])
     for (const horas of [-1, 0, 0.5, 1, 6, 12, 24, 48])
       for (const edMin of [-5000, -2900, -1441, -1440, -721, -720, -719, -361, -360, -60, -1, 0, 30, null, undefined] as (number | null | undefined)[])
-        for (const reMin of [null, -6000, -3000, -800, -720, -100, -61, -60, -59, -30, -1, 0, 10] as (number | null)[]) {
+        for (const reMin of [null, -6000, -3000, -800, -720, -100, -61, -60, -59, -30, -1, 0, 4, 5, 6, 10, 60 * 24 * 365 * 70] as (number | null)[]) {
           const editadaAt = edMin === undefined ? undefined : edMin === null ? null : iso(ahora + edMin * 60_000);
           const reactivadaAt = reMin === null ? null : iso(ahora + reMin * 60_000);
           const j = juzgarCotizacionCorregida({ editada, editadaAt, horasPausa: horas, reactivadaAt, ahoraMs: ahora });
@@ -92,7 +105,8 @@ const J = (x: Partial<Parameters<typeof juzgarCotizacionCorregida>[0]>): JuicioC
             const ed = ahora + edMin * 60_000;
             const re = reMin === null ? null : ahora + reMin * 60_000;
             const dentro = ed >= ahora - horas * H;
-            const reactivoDespues = re != null && re > ed;
+            // Una reactivación más en el futuro que el margen no cuenta (la escribió alguien a mano).
+            const reactivoDespues = re != null && re <= ahora + MARGEN_RELOJ_REACTIVACION_MS && re > ed;
             if (dentro && !reactivoDespues && j.usar) { invariante++; if (fallas.length < 40) fallas.push(`invariante: ${JSON.stringify({ horas, edMin, reMin, j })}`); }
             // El mismo juicio que la ventana del chat: una corrección cuenta como actividad ⟺ cae desde
             // `inicioVentanaHumano`.
@@ -100,6 +114,8 @@ const J = (x: Partial<Parameters<typeof juzgarCotizacionCorregida>[0]>): JuicioC
             if (cuenta === j.usar) { cruce++; if (fallas.length < 40) fallas.push(`cruce: ${JSON.stringify({ horas, edMin, reMin, codigo: j.codigo })}`); }
             if (j.codigo === "ejecutivo_activo" && j.retomaMs !== ed + horas * H) { invariante++; }
           }
+          // Una reactivación más allá del margen nunca es la razón de usar la fila.
+          if (j.codigo === "reactivada" && reMin != null && reMin * 60_000 > MARGEN_RELOJ_REACTIVACION_MS) invariante++;
           // Lo que no se sabe nunca deja usar la fila (salvo sin pausa, o sin corrección).
           if (editada && horas > 0 && edMin === undefined && j.usar) invariante++;
           // Sin corrección SIEMPRE se usa, y nunca se espera sin una corrección.
@@ -117,7 +133,7 @@ const J = (x: Partial<Parameters<typeof juzgarCotizacionCorregida>[0]>): JuicioC
   t("horaLimaNota: mismo día → «HH:MM»; otro día → «HH:MM del DD/MM»", horaLimaNota(ahora - H, ahora) === "09:00" && horaLimaNota(ahora + 11 * H, ahora) === "21:00" && horaLimaNota(ahora + 15 * H, ahora) === "01:00 del 22/10" && horaLimaNota(null, ahora) === null);
   const activo = J({});
   const e = notaEsperaCorreccion(activo, { numero: "00736", que: "politicas", ahoraMs: ahora })!;
-  t("nota de espera: el número, las dos horas, la pausa y cómo destrabarla", e.startsWith("🕒 La cotización N° 00736 se corrigió a las 09:00.") && e.includes("hasta las 21:00") && e.includes("pausa de 12 h") && e.includes("las políticas") && e.includes("reactiva la IA"));
+  t("nota de espera: el número, las dos horas, la pausa y cómo destrabarla", e.startsWith("🕒 La cotización N° 00736 se corrigió a las 09:00.") && e.includes("hasta las 21:00") && e.includes("pausa de 12 h") && e.includes("las políticas") && e.includes("o pausa y vuelve a activar la IA en este chat (🤖)"));
   const madrugada = Date.parse("2026-10-21T07:00:00Z"), tarde = Date.parse("2026-10-21T19:00:00Z");
   const e1 = notaEsperaCorreccion(J({ editadaAt: iso(Date.parse("2026-10-21T06:20:00Z")), ahoraMs: madrugada }), { numero: "1", que: "adelanto", ahoraMs: madrugada })!;
   const e2 = notaEsperaCorreccion(J({ editadaAt: iso(Date.parse("2026-10-21T18:20:00Z")), ahoraMs: tarde }), { numero: "1", que: "adelanto", ahoraMs: tarde })!;
@@ -125,7 +141,14 @@ const J = (x: Partial<Parameters<typeof juzgarCotizacionCorregida>[0]>): JuicioC
   const sh = notaEsperaCorreccion(J({ editadaAt: undefined }), { numero: "00736", que: "importes", ahoraMs: ahora })!;
   t("nota sin hora: nombra la migración y no promete una hora", sh.includes(SQL_ACTIVIDAD_EJECUTIVO) && !/hasta la/.test(sh) && sh.includes("los importes"));
   t("nota de espera: null cuando se puede usar", notaEsperaCorreccion(J({ editadaAt: iso(ahora - 13 * H) }), { numero: "1", que: "adelanto", ahoraMs: ahora }) === null && notaEsperaCorreccion(J({ editada: false }), { numero: "1", que: "adelanto", ahoraMs: ahora }) === null);
-  t("nota de la solicitud: las dos horas y la tarjeta", notaSolicitudCorregida(activo, ahora) === "La cotización se corrigió a las 09:00: el adelanto lo pide el ejecutivo desde la tarjeta (la IA lo pediría desde las 21:00).");
+  t("nota de la solicitud: la hora de la corrección, la pausa y «Hay unidad» (sin prometer una hora)", notaSolicitudCorregida(activo, ahora) === "La cotización se corrigió a las 09:00 y no había pasado la pausa del ejecutivo (12 h): el adelanto lo pide el ejecutivo desde la tarjeta con «Hay unidad».");
+  const disp = notaDisponibilidadCorregida(activo, { numero: "00736", ahoraMs: ahora })!;
+  const dispSh = notaDisponibilidadCorregida(J({ editadaAt: undefined }), { numero: "00736", ahoraMs: ahora })!;
+  t("nota «por confirmar»: la hora, la pausa, que la IA no lo pidió y «Hay unidad»", disp === "🕒 La cotización N° 00736 se corrigió a las 09:00 y no había pasado la pausa del ejecutivo (12 h): la IA no le pidió el adelanto. Pídeselo tú desde la tarjeta con «Hay unidad».");
+  t("nota «por confirmar» sin hora: nombra la migración", dispSh.includes("no se sabe a qué hora") && dispSh.includes(SQL_ACTIVIDAD_EJECUTIVO) && dispSh.endsWith("con «Hay unidad»."));
+  t("nota «por confirmar»: null si se usa la fila", notaDisponibilidadCorregida(J({ editada: false }), { numero: "1", ahoraMs: ahora }) === null);
+  const sinPromesa = [notaSolicitudCorregida(activo, ahora)!, notaSolicitudCorregida(J({ editadaAt: undefined }), ahora)!, disp, dispSh];
+  t("las notas de una solicitud «disponibilidad primero» no prometen una hora ni una reactivación", sinPromesa.every((x) => !/hasta|pedir[íi]a|desde las|reactiv|vuelve a activar/i.test(x) && x.includes("Hay unidad")));
   t("nota de la solicitud sin hora, y null si se usa", /no se sabe a qué hora/.test(notaSolicitudCorregida(J({ editadaAt: undefined }), ahora) ?? "") && notaSolicitudCorregida(J({ editada: false }), ahora) === null);
   const usos = (["pausa_cumplida", "reactivada", "pausa_apagada", "sin_persona"] as const).map((c) => {
     const j = c === "pausa_cumplida" ? J({ editadaAt: iso(ahora - 13 * H) }) : c === "reactivada" ? J({ reactivadaAt: iso(ahora - 60_000) }) : c === "pausa_apagada" ? J({ horasPausa: 0 }) : J({ editadaAt: null });
@@ -133,7 +156,7 @@ const J = (x: Partial<Parameters<typeof juzgarCotizacionCorregida>[0]>): JuicioC
   });
   t("nota de uso: una por cada código que usa la fila corregida, con el porqué", usos.every((u) => u.j.codigo === u.c && !!u.n && u.n.includes("CORREGIDA") && u.n.includes("N° 00736")));
   t("nota de uso: null sin corrección o esperando", notaUsoCorreccion(J({ editada: false }), { numero: "1", ahoraMs: ahora }) === null && notaUsoCorreccion(activo, { numero: "1", ahoraMs: ahora }) === null);
-  const todas = [e, e1, e2, sh, notaSolicitudCorregida(activo, ahora)!, ...usos.map((u) => u.n!)];
+  const todas = [e, e1, e2, sh, ...sinPromesa, ...usos.map((u) => u.n!)];
   t("ninguna nota habla de dinero ni trae importes", todas.every((x) => !mencionaDinero(x.replace(/pedido de adelanto con las cuentas|el adelanto|monto del adelanto|los importes de la cotización|los importes y las condiciones/g, ""))));
 }
 

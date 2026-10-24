@@ -28,8 +28,10 @@
 //   pausa_cumplida   pasaron las N h desde la corrección                                → usa
 //   ejecutivo_activo la corrección es de hace menos de N h                              → ESPERA (retomaMs)
 // La frontera es la del chat (`inicioVentanaHumano` + `gte`, lib/crm-ia-reactivacion.ts): una
-// corrección de hace EXACTAMENTE N h todavía aparta a la IA, igual que una respuesta en el chat. La
-// matriz cruza esta regla con `inicioVentanaHumano` en todo el barrido.
+// corrección de hace EXACTAMENTE N h todavía aparta a la IA, igual que una respuesta en el chat. Una
+// reactivación más en el futuro que `MARGEN_RELOJ_REACTIVACION_MS` (5 min) no cuenta, como en el chat:
+// la escribe el servidor con su reloj, y una de 2099 solo pudo ponerla alguien a mano para saltarse la
+// pausa. La matriz cruza esta regla con `inicioVentanaHumano` en todo el barrido.
 //
 // LO QUE NO HACE: decidir qué se envía. Quien llama, con `usar: false`, no deriva (derivar pausa la IA
 // para siempre, y la decisión es que vuelva sola): manda un aviso sin importes ni políticas y deja una
@@ -37,7 +39,7 @@
 // Matriz: npx tsx scripts/prueba-cotizacion-corregida.mts
 // ──────────────────────────────────────────────────────────────────────────────
 
-import { HORAS_PAUSA_DEFECTO } from "../crm-ia-reactivacion";
+import { HORAS_PAUSA_DEFECTO, reactivacionValida } from "../crm-ia-reactivacion";
 import { fechaLima, minutoDelDiaLima, minutosAHhmm } from "../alertas-horario";
 import { aLas } from "../crm-ia-atencion";
 
@@ -104,7 +106,7 @@ export function juzgarCotizacionCorregida(x: {
   if (x.editadaAt === null) return j("sin_persona");
   const ed = msDe(x.editadaAt);
   if (ed == null || !Number.isFinite(x.ahoraMs)) return j("sin_hora");
-  const re = msDe(x.reactivadaAt);
+  const re = reactivacionValida(x.reactivadaAt, x.ahoraMs);
   if (re != null && re > ed) return j("reactivada", ed);
   const pausaMs = horas * 3_600_000;
   if (x.ahoraMs - pausaMs > ed) return j("pausa_cumplida", ed);
@@ -128,7 +130,12 @@ export function horaLimaNota(ms: number | null | undefined, ahoraMs: number): st
 /** «12 h», «1 h», «1.5 h». */
 const textoHoras = (h: number) => `${Math.round(h * 100) / 100} h`;
 
-/** Lo que la IA deja de enviar mientras espera, y cómo lo envía el ejecutivo. */
+/**
+ * Lo que la IA deja de enviar mientras espera, y cómo lo envía el ejecutivo. Solo donde la IA lo
+ * enviaría sola pasada la pausa (el reenvío del pedido de adelanto con los MISMOS importes, las
+ * políticas, el total de la cotización ya enviada, el adelanto que nombra T3): ahí «hasta las HH:MM» es
+ * cierto. Una solicitud que nació «disponibilidad primero» la termina el ejecutivo (`notaDisponibilidadCorregida`).
+ */
 export type LoQueEspera = "adelanto" | "politicas" | "importes" | "adelanto_esperado";
 
 const ESPERA: Record<LoQueEspera, { cosa: string; tu: string }> = {
@@ -148,9 +155,21 @@ export function notaEsperaCorreccion(j: JuicioCorreccion, x: { numero: string | 
   const e = ESPERA[x.que];
   if (j.codigo === "ejecutivo_activo") {
     const desde = horaLimaNota(j.editadaMs, x.ahoraMs), hasta = horaLimaNota(j.retomaMs, x.ahoraMs);
-    return `🕒 La cotización ${n}se corrigió a ${aLas(desde ?? "")}. La IA no envía ${e.cosa} hasta ${aLas(hasta ?? "")} (pausa de ${textoHoras(j.horas)} desde la última actividad en la cotización). ${e.tu}, o reactiva la IA en este chat (🤖) cuando termines de corregirla.`;
+    return `🕒 La cotización ${n}se corrigió a ${aLas(desde ?? "")}. La IA no envía ${e.cosa} hasta ${aLas(hasta ?? "")} (pausa de ${textoHoras(j.horas)} desde la última actividad en la cotización). ${e.tu}, o pausa y vuelve a activar la IA en este chat (🤖) cuando termines de corregirla.`;
   }
   return `🕒 La cotización ${n}se corrigió después de que la IA la escribió y no se sabe a qué hora (falta correr ${SQL_ACTIVIDAD_EJECUTIVO}, o no se pudo leer): la IA no envía ${e.cosa} con la cotización corregida. ${e.tu}.`;
+}
+
+/**
+ * Por qué una solicitud nació «disponibilidad primero» por una corrección: la hora en que se corrigió
+ * (si se sabe), que no había pasado la pausa del ejecutivo, y que el adelanto lo pide el ejecutivo con
+ * «Hay unidad». SIN promesa de hora: esa solicitud queda `por_confirmar` y la IA no le pedirá el pago
+ * después (la termina el ejecutivo desde la tarjeta).
+ */
+function porQueDisponibilidad(j: JuicioCorreccion, ahoraMs: number): string {
+  return j.codigo === "ejecutivo_activo"
+    ? `se corrigió a ${aLas(horaLimaNota(j.editadaMs, ahoraMs) ?? "")} y no había pasado la pausa del ejecutivo (${textoHoras(j.horas)})`
+    : "se corrigió después de enviarla y no se sabe a qué hora";
 }
 
 /**
@@ -159,10 +178,18 @@ export function notaEsperaCorreccion(j: JuicioCorreccion, x: { numero: string | 
  */
 export function notaSolicitudCorregida(j: JuicioCorreccion, ahoraMs: number): string | null {
   if (j.usar) return null;
-  if (j.codigo === "ejecutivo_activo") {
-    return `La cotización se corrigió a ${aLas(horaLimaNota(j.editadaMs, ahoraMs) ?? "")}: el adelanto lo pide el ejecutivo desde la tarjeta (la IA lo pediría desde ${aLas(horaLimaNota(j.retomaMs, ahoraMs) ?? "")}).`;
-  }
-  return "La cotización se corrigió después de enviarla y no se sabe a qué hora: el adelanto lo pide el ejecutivo desde la tarjeta.";
+  return `La cotización ${porQueDisponibilidad(j, ahoraMs)}: el adelanto lo pide el ejecutivo desde la tarjeta con «Hay unidad».`;
+}
+
+/**
+ * La línea 🕒 de la nota «por CONFIRMAR» (avisarPorConfirmar) de esa misma solicitud: lo mismo, para
+ * el ejecutivo, y que la IA NO le pidió el adelanto. null si no aplica.
+ */
+export function notaDisponibilidadCorregida(j: JuicioCorreccion, x: { numero: string | null; ahoraMs: number }): string | null {
+  if (j.usar) return null;
+  const n = x.numero ? `N° ${x.numero} ` : "";
+  const sinHora = j.codigo === "ejecutivo_activo" ? "" : ` (falta correr ${SQL_ACTIVIDAD_EJECUTIVO}, o no se pudo leer)`;
+  return `🕒 La cotización ${n}${porQueDisponibilidad(j, x.ahoraMs)}${sinHora}: la IA no le pidió el adelanto. Pídeselo tú desde la tarjeta con «Hay unidad».`;
 }
 
 /**

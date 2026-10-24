@@ -49,7 +49,10 @@
 //     «disponibilidad primero» con `cotizacion_corregida`), su reenvío, las políticas (T8) y el adelanto
 //     que nombra T3 salen de la fila; si su huella no es la de la IA y la última corrección de una
 //     persona (`editada_at`) es de hace menos de `pausa_humano_horas` —sin una reactivación posterior—,
-//     la IA no la manda: T12 y una nota, SIN derivar (derivar pausa la IA para siempre).
+//     la IA no la manda: T12 y una nota, SIN derivar (derivar pausa la IA para siempre). La espera va
+//     DESPUÉS de los controles que ya derivaban (importes o cuentas distintos de los de T1, políticas
+//     sospechosas…): solo espera lo que pasada la pausa saldría solo. Una solicitud que nació
+//     «disponibilidad primero» por esto la termina el ejecutivo con «Hay unidad».
 // Matriz de punta a punta: ANTHROPIC_API_KEY=x npx tsx scripts/prueba-reserva-ia.mts
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -105,7 +108,7 @@ import { adjuntoDeComprobante, correoReserva, destinatariosReserva, type DatosCo
 import { inicioServicioMs } from "./reserva-alertas";
 import { leerConfigIA, SQL_RESERVA_TRASLADOS } from "./datos";
 import { correccionDeCotizacion, type PausaEjecutivo } from "./cotizacion-corregida-datos";
-import { notaEsperaCorreccion, notaSolicitudCorregida, notaUsoCorreccion, type JuicioCorreccion } from "./cotizacion-corregida";
+import { notaDisponibilidadCorregida, notaEsperaCorreccion, notaSolicitudCorregida, notaUsoCorreccion, type JuicioCorreccion } from "./cotizacion-corregida";
 import { horasPausaHumano } from "../crm-ia-reactivacion";
 import {
   enlaceWaMe, ventana24h, type AccionDinero, type AccionTarjeta, type CodigoResultadoReserva, type ComprobanteVista,
@@ -704,7 +707,7 @@ async function avisarPorConfirmar(ctx: CtxReservaIA, c: Creada, ahora: number, d
     `📅 Reserva de traslado por CONFIRMAR (cotización N° ${c.cc.numero}, solicitud #${c.s.id})${c.orden.urgente ? " · ⚠ URGENTE" : ""}.`,
     "Todavía NO se le pidió el pago: confirma la unidad desde la tarjeta («Hay unidad» / «No hay unidad»).",
     ...motivos.map((m) => `• ${MOTIVO_ORDEN[m] ?? m}`),
-    ...(c.correccion ? [notaEsperaCorreccion(c.correccion, { numero: c.cc.numero, que: "adelanto", ahoraMs: ahora })].filter((l): l is string => !!l) : []),
+    ...(c.correccion ? [notaDisponibilidadCorregida(c.correccion, { numero: c.cc.numero, ahoraMs: ahora })].filter((l): l is string => !!l) : []),
     correo.enviado ? `Correo enviado a ${correo.destinatarios.join(", ")}.` : `El correo no salió: ${correo.error ?? "sin destinatarios"}.`,
   ];
   await nota(ctx.sb, ctx.conv.id, lineas.join("\n"), "Asistente IA");
@@ -813,12 +816,6 @@ async function yaSolicitada(ctx: CtxReservaIA, s: FilaSolicitud, ahora: number, 
   let cc: ContextoCotizacion;
   try { cc = await contextoCotizacion(ctx.sb, s.cotizacion_id); }
   catch (e) { return derivaIA("No se pudo leer la cotización de la reserva", pedido, seguro(e, "yaSolicitada")); }
-  // Volver a pedir el pago manda los importes y las cuentas de la fila: si una persona la corrigió y la
-  // pausa tras su actividad no ha pasado, T12 y una nota; NO se deriva (la IA vuelve sola tras la pausa).
-  if (s.estado === "esperando_pago") {
-    const espera = await esperaPorCorreccion(ctx, cc, ahora, "adelanto");
-    if (espera) return espera;
-  }
   if (s.estado === "esperando_pago" && s.firma_importes && firmaImportes(cc.fila, pctDe(s)) !== importesDeFirma(s.firma_importes)) {
     return derivaIA("La cotización cambió desde que se le pidió el pago", pedido,
       `Solicitud #${s.id}: los importes de la cotización N° ${cc.numero} ya no son los que se le comunicaron al cliente. Revísala antes de volver a pedirle el pago.`, cc.numero);
@@ -829,6 +826,12 @@ async function yaSolicitada(ctx: CtxReservaIA, s: FilaSolicitud, ahora: number, 
       huellaEnviada: huellaDeFirma(s.firma_importes), huellaActual: huellaCuentas(cc.cuentas.lineasHuella),
     });
     if (!j.ok) return derivaIA("No se le volvieron a mandar las cuentas de pago", pedido, `Solicitud #${s.id} (cotización N° ${cc.numero}): ${j.nota}`, cc.numero);
+    // Con los MISMOS importes y las mismas cuentas que recibió, el reenvío saldría de la fila: si una
+    // persona la corrigió y la pausa tras su actividad no ha pasado, T12 y una nota «hasta las HH:MM»
+    // (cierta: pasada la pausa, este mismo reenvío sale); NO se deriva (la IA vuelve sola tras la pausa).
+    // Va DESPUÉS de los dos controles de arriba: si los importes o las cuentas cambiaron, se deriva como siempre.
+    const espera = await esperaPorCorreccion(ctx, cc, ahora, "adelanto");
+    if (espera) return espera;
   }
   const mensaje = s.estado === "esperando_pago" || s.estado === "por_confirmar" ? mensajeDeSolicitud(s, cc, ahora, ctx, deps) : null;
   return solo("ya_solicitada", cc.numero, undefined, mensaje);
@@ -1112,9 +1115,6 @@ export async function politicasIA(ctx: CtxReservaIA, input: unknown, deps: DepsR
   if (!elegida) return derivaIA("Políticas de reserva sin cotización de traslado", pedido, "No hay una cotización de traslado enviada en el chat de la que leer las políticas.");
   try {
     const cc = await contextoCotizacion(ctx.sb, elegida.cand.id);
-    // Las políticas salen de la fila: corregida hace poco por una persona → T12 y una nota, sin derivar.
-    const espera = await esperaPorCorreccion(ctx, cc, ahora, "politicas");
-    if (espera) return espera;
     const exceso = excesoCondiciones({ reserva: cc.politica, reserva_resumen: cc.resumen });
     if (cc.politicaSospechosa || exceso.length) {
       const por = [
@@ -1133,6 +1133,11 @@ export async function politicasIA(ctx: CtxReservaIA, input: unknown, deps: DepsR
     const cond = condicionesDeContexto(cc, appUrlDe(deps));
     const m = mensajePoliticas({ numero: cc.numero, lineas: cc.politica, email: cc.perfil?.email ?? null, estilo: vozDe(ctx.agente, cc), resumen: cond.resumen, enlace: cond.enlace });
     if (!m) return derivaIA("La cotización no tiene políticas de reserva", pedido, `La cotización N° ${cc.numero} no tiene políticas de reserva y cancelación (/cotizaciones/plantillas).`, cc.numero);
+    // Las políticas salen de la fila: si una persona la corrigió y la pausa tras su actividad no ha
+    // pasado, T12 y una nota «hasta las HH:MM», sin derivar. Va justo antes de enviarlas, después de los
+    // controles que derivan (sospechosa, no cabe, en otro idioma, sin políticas): así la nota es cierta.
+    const espera = await esperaPorCorreccion(ctx, cc, ahora, "politicas");
+    if (espera) return espera;
     return solo("enviar_politicas", cc.numero, undefined, m);
   } catch (err) {
     return derivaIA("No se pudieron leer las políticas de reserva", pedido, seguro(err, "politicasIA"), elegida.cand.numero);
