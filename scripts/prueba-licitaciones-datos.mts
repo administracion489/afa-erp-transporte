@@ -355,7 +355,8 @@ sec("2. crear · duplicar · archivar · lista liviana con última emisión");
     check(f1.ultimaEmision?.version === 2 && f1.ultimaEmision.emitido_por_nombre === "Yo Mismo" && f1.actualizado_por_nombre === "Ana Pérez", "última emisión = la de mayor versión, con nombre");
     check(l.filas.find((f) => f.id === 2)!.ultimaEmision === null && l.emisiones === "ok", "sin emisiones → null (leída)");
     const orden = l.filas.map((f) => f.fecha_presentacion);
-    check(orden.indexOf(null) === orden.length - 1 || !orden.includes(null), "sin fecha de presentación al final");
+    const primeraNula = orden.indexOf(null);
+    check(primeraNula === -1 || orden.slice(primeraNula).every((x) => x === null), "sin fecha de presentación al final");
   }
   const arch = await leerLicitaciones({ archivadas: true });
   check(arch.ok && arch.filas.length >= 1 && arch.filas.every((f) => f.archivada), "archivadas: true → solo archivadas");
@@ -417,7 +418,9 @@ sec("4. Fuente que falla en la página 2 → «error» (no «ok» con media list
   const ctx = await cargarContexto(lic);
   check(ctx.lecturas.unidades === "error", "unidades = error");
   check(Object.keys(ctx.unidades).length === 0, "sin unidades a medias");
-  const otras = (Object.keys(ctx.lecturas) as FuenteContexto[]).filter((k) => k !== "unidades");
+  // documentos_vehiculo también lo lee cargarSeguros (SOAT de la flota): esa fuente cae con ella, y es lo correcto.
+  check(ctx.lecturas.seguros === "error", "seguros (lee la misma tabla) también = error");
+  const otras = (Object.keys(ctx.lecturas) as FuenteContexto[]).filter((k) => k !== "unidades" && k !== "seguros");
   check(otras.every((k) => ctx.lecturas[k] === "ok"), `las demás ok (${JSON.stringify(ctx.lecturas)})`);
 }
 
@@ -465,7 +468,7 @@ sec("6. Barrido de fallas por tabla (invariante + corolario)");
 {
   const MAPA: Record<string, FuenteContexto[]> = {
     empresa_perfil: ["perfil"], vehiculos: ["unidades"], vehiculos_tercero: ["unidades"], documentos_vehiculo: ["unidades", "seguros"],
-    documentos_tercero: ["unidades", "seguros"], empresas_tercerizadas: ["unidades", "conductores", "seguros"], conductores: ["conductores", "seguros"],
+    documentos_tercero: ["unidades", "seguros"], empresas_tercerizadas: ["unidades", "conductores"], conductores: ["conductores", "seguros"],
     conductores_tercero: ["conductores"], documentos_empresa: ["conductores", "legajo"], experiencia_empresa: ["experiencia"],
     personal_administrativo: ["personal", "seguros"], seguros: ["seguros"], licitaciones: ["otras"], clientes: ["otras"],
   };
