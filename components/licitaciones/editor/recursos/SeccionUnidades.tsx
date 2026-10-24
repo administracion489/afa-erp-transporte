@@ -28,6 +28,7 @@ import { anclaDe, type PasoProps } from "../contrato-editor";
 import { ArchivoOrigen, Boton, CampoEntero, CampoTexto, Chip, ChipVigencia, dmy, Etiqueta, hrefSeguro, ListaHallazgos, Nota, Seccion } from "./comun";
 import { deSujeto, generalesDe } from "./hallazgos";
 import ModalDocUnidad from "./ModalDocUnidad";
+import ExigenciasBases from "./ExigenciasBases";
 
 type ResU = Awaited<ReturnType<typeof buscarUnidades>>;
 
@@ -96,7 +97,7 @@ export default function SeccionUnidades({ p, opciones, recargarOpciones, refs, h
 
   const agregar = (o: OpcionUnidad) => {
     const ya = elegidas.get(o.clave);
-    if (ya) { p.aviso(`${o.placa} ya está en la lista como ${ya.codigo || "unidad sin código"}.`, "aviso"); p.irA("recursos", anclaDe("unidad", ya.id)); return; }
+    if (ya) { p.aviso(`${o.placa} ya está en la lista como ${ya.codigo || "unidad sin código"}.`, "aviso"); p.irA("recursos", anclaDe("unidad", ya.clave)); return; }
     if (lleno) { p.aviso(`El tope es de ${TOPES_DOC.maxUnidades} unidades por licitación.`, "aviso"); return; }
     const id = p.nuevoId();
     p.cambiarDoc((d) => (d.unidades.some((u) => u.clave === o.clave) ? d : {
@@ -161,6 +162,7 @@ export default function SeccionUnidades({ p, opciones, recargarOpciones, refs, h
       subtitulo={<>{doc.unidades.length ? `${titulares} titular${titulares === 1 ? "" : "es"} · ${doc.unidades.length - titulares} de retén` : "Elige las unidades que se ofertan, de la flota propia o tercerizada."}</>}
       acciones={!soloLectura && doc.unidades.length > 1 ? <Boton chico onClick={renumerar}>Renumerar U1… / R1…</Boton> : null}>
       <ListaHallazgos hallazgos={generales} irA={p.irA} />
+      <ExigenciasBases requisitos={doc.requisitos} revision={p.revision} tipos={(t) => t.startsWith("unidad") || t === "prohibe_subcontratacion"} irA={p.irA} />
 
       {!soloLectura && (
         <div className="space-y-2 rounded-xl border border-dashed border-gray-300 p-3">
@@ -216,6 +218,7 @@ export default function SeccionUnidades({ p, opciones, recargarOpciones, refs, h
         <ol className="space-y-3">
           {orden.map((el, k) => (
             <TarjetaUnidad key={el.id} p={p} el={el} k={k} total={orden.length} refs={refs}
+              conAncla={orden.findIndex((x) => x.clave === el.clave) === k}
               u={ctx?.unidades[el.clave]} op={opPorClave.get(el.clave)}
               pendiente={pendiente(el.clave)} hallazgos={deSujeto(hallazgos, "unidad", el.clave)}
               vecinoArriba={orden[k - 1]} vecinoAbajo={orden[k + 1]}
@@ -235,8 +238,10 @@ export default function SeccionUnidades({ p, opciones, recargarOpciones, refs, h
 }
 
 // ══ Una unidad ═══════════════════════════════════════════════════════════════════
-function TarjetaUnidad({ p, el, k, total, refs, u, op, pendiente, hallazgos, vecinoArriba, vecinoAbajo, onRenombrar, onRol, onCambiar, onMover, onQuitar, onSubir }: {
+function TarjetaUnidad({ p, el, k, total, refs, conAncla, u, op, pendiente, hallazgos, vecinoArriba, vecinoAbajo, onRenombrar, onRol, onCambiar, onMover, onQuitar, onSubir }: {
   p: PasoProps; el: UnidadElegida; k: number; total: number; refs: RefsRecurso | null;
+  /** Solo la primera tarjeta de una clave lleva el ancla (una repetida no puede tener el mismo id). */
+  conAncla: boolean;
   u: UnidadERP | undefined; op: OpcionUnidad | undefined; pendiente: boolean;
   hallazgos: Hallazgo[]; vecinoArriba?: UnidadElegida; vecinoAbajo?: UnidadElegida;
   onRenombrar: (v: string) => void; onRol: (r: RolUnidad) => void; onCambiar: (c: Partial<UnidadElegida>) => void;
@@ -257,7 +262,7 @@ function TarjetaUnidad({ p, el, k, total, refs, u, op, pendiente, hallazgos, vec
   else if (!u) estado = pendiente ? "comprobando" : "no_existe";
 
   return (
-    <li id={anclaDe("unidad", el.id)} className={`scroll-mt-24 rounded-xl border p-3 ${prohibida ? "border-red-300 bg-red-50/60" : "border-gray-200 bg-white"}`}>
+    <li id={conAncla ? anclaDe("unidad", el.clave) : undefined} className={`scroll-mt-24 rounded-xl border p-3 ${prohibida ? "border-red-300 bg-red-50/60" : "border-gray-200 bg-white"}`}>
       <div className="flex flex-wrap items-start gap-2">
         <div className="w-20 flex-shrink-0">
           <CampoTexto valor={el.codigo} onCambio={onRenombrar} alSalir mayusculas maxLength={20} ariaLabel="Código de la unidad" disabled={soloLectura} placeholder="U1" className="font-mono font-bold" />

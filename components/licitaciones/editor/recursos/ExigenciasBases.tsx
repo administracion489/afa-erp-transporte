@@ -34,7 +34,7 @@ export default function ExigenciasBases({ requisitos, revision, tipos, irA }: {
               <span>{describirRegla(q.regla!)}</span>
               {est ? <Chip tono={est.tono}>{est.texto}{ev?.fuente === "manual" ? " (a mano)" : ""}</Chip> : <span className="text-[11px] text-gray-400">comprobando…</span>}
               {ev?.auto?.detalle && <span className="text-[11px] text-gray-500">· {ev.auto.detalle}</span>}
-              <button type="button" onClick={() => irA("bases", anclaDe("req", q.id))} className="text-[11px] font-semibold text-[#0b315f] underline">ver requisito</button>
+              <button type="button" onClick={() => irA("bases", anclaDe("requisito", q.id))} className="text-[11px] font-semibold text-[#0b315f] underline">ver requisito</button>
             </li>
           );
         })}

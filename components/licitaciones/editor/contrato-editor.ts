@@ -29,7 +29,7 @@ export type PasoProps = {
   recargarCtx: () => void;
   /** revisarLicitacion(lic en edición, ctx). null mientras no hay contexto. */
   revision: Revision | null;
-  /** Ir a otro paso (y a un ancla dentro de él: un id de elemento del DOM, p. ej. `req-<id>`). */
+  /** Ir a otro paso (y a un ancla dentro de él: un panel («requisitos») o un elemento («requisito:<uuid>»): ver ANCLAS abajo). */
   irA: (paso: Paso, ancla?: string | null) => void;
   /** Archivada o sin permiso de escritura: los pasos no ofrecen controles de edición. */
   soloLectura: boolean;
@@ -39,6 +39,33 @@ export type PasoProps = {
   aviso: (texto: string, tono?: TonoAviso) => void;
 };
 
-/** Ancla estable de un elemento del doc, la MISMA para quien la pinta y para quien navega hacia ella. */
-export const anclaDe = (tipo: "req" | "consulta" | "unidad" | "conductor" | "seccion" | "bloque" | "bexp" | "item" | "contacto" | "exp", id: string | number): string =>
-  `${tipo}-${id}`;
+/**
+ * ANCLAS: la MISMA forma con que lib/licitaciones/revision.ts escribe `Hallazgo.donde.ancla`, para que
+ * «Ir al arreglo» lleve exactamente al elemento. Dos formas:
+ *  · un PANEL del paso: el id del DOM es el nombre tal cual (`id="requisitos"`, `id="unidades"`…);
+ *  · un ELEMENTO concreto: `<tipo>:<id>` (`id="requisito:<uuid>"`, `id="bloque:<uuid>"`,
+ *    `id="unidad:p:12"` — en unidades y conductores el id es la ClaveRecurso, no el uuid de la elección).
+ * El editor busca el elemento; si no existe, cae al panel que corresponde al tipo (`panelDeAncla`).
+ */
+export const PANELES = [
+  "datos", "bases_subidas", "analisis", "requisitos", "consultas",
+  "unidades", "conductores", "experiencia", "contactos", "representante",
+  "portada", "control", "carta", "glosario", "indice", "secciones", "cierre",
+  "expediente", "foliado", "hallazgos", "emision",
+] as const;
+export type Panel = (typeof PANELES)[number];
+export type TipoAncla =
+  | "requisito" | "consulta" | "unidad" | "conductor" | "contacto" | "experiencia"
+  | "seccion" | "bloque" | "bloque_expediente" | "item";
+export const anclaDe = (tipo: TipoAncla, id: string | number): string => `${tipo}:${id}`;
+
+const PANEL_DE_TIPO: Record<TipoAncla, Panel> = {
+  requisito: "requisitos", consulta: "consultas", unidad: "unidades", conductor: "conductores", contacto: "contactos",
+  experiencia: "experiencia", seccion: "secciones", bloque: "secciones", bloque_expediente: "expediente", item: "expediente",
+};
+/** El panel al que se cae si el elemento no está en pantalla. null = el ancla ya es un panel (o no se conoce). */
+export function panelDeAncla(ancla: string): Panel | null {
+  const i = ancla.indexOf(":");
+  if (i < 0) return null;
+  return (PANEL_DE_TIPO as Record<string, Panel>)[ancla.slice(0, i)] ?? null;
+}

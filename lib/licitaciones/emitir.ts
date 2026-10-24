@@ -38,9 +38,13 @@
 //
 // CÓMO SE ARMA (y por qué en este orden)
 //  1. Se resuelven el expediente y el documento (SIN folios) y se cuenta quién usa cada URL.
-//  2. Se baja cada fuente UNA vez (3 a la vez, con tope de tiempo y de bytes), cuando el primer bloque la
-//     necesita; sus bytes se SUELTAN apenas el último bloque que la usa terminó (R12: ~250 MB de fuentes).
-//     Las imágenes de la propuesta, el logo y la firma (pocas y chicas) se conservan hasta el final.
+//  2. La comprobación va JUNTO con la descarga: cada fuente se baja UNA vez (3 a la vez, con tope de tiempo
+//     y de bytes), cuando el primer bloque la necesita, y se revisa ahí (sha256, formato por la firma de
+//     los bytes, cifrado). Sus bytes se SUELTAN apenas el último bloque que la usa terminó (R12: ~250 MB
+//     de fuentes). Las imágenes de la propuesta, el logo y la firma (pocas y chicas) se conservan hasta el
+//     final. Lo que devolvió el ensayo (`extra.revisiones`) NO evita bajar —hacen falta los bytes, y el
+//     bucket `documentos` deja sobrescribir—: sirve para AVISAR si un archivo cambió entre el ensayo y la
+//     emisión. Una fuente que ya se sabe externa no se intenta bajar.
 //  3. Propuesta SIN folios (P0) → cada bloque activo con `armarBloque`, de a uno (con P0 donde un bloque
 //     lleva la parte `propuesta`). Un bloque de 0 páginas no se emite (se avisa).
 //  4. `mapaFolios` sobre [propuesta si `propuestaEnCompleto = "primero"`] + bloques.

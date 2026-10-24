@@ -18,6 +18,7 @@ import { anclaDe, type PasoProps } from "../contrato-editor";
 import { ArchivoOrigen, Boton, Chip, ChipVigencia, dmy, ListaHallazgos, Nota, Seccion } from "./comun";
 import { deSujeto, generalesDe } from "./hallazgos";
 import ModalDocConductor from "./ModalDocConductor";
+import ExigenciasBases from "./ExigenciasBases";
 
 type ResC = Awaited<ReturnType<typeof buscarConductores>>;
 const LIMITE = 50;
@@ -52,7 +53,7 @@ export default function SeccionConductores({ p, opciones, recargarOpciones, refs
 
   const agregar = (o: OpcionConductor) => {
     const ya = elegidos.get(o.clave);
-    if (ya) { p.aviso(`${o.nombre} ya está en la lista.`, "aviso"); p.irA("recursos", anclaDe("conductor", ya.id)); return; }
+    if (ya) { p.aviso(`${o.nombre} ya está en la lista.`, "aviso"); p.irA("recursos", anclaDe("conductor", ya.clave)); return; }
     if (lleno) { p.aviso(`El tope es de ${TOPES_DOC.maxConductores} conductores por licitación.`, "aviso"); return; }
     const id = p.nuevoId();
     p.cambiarDoc((d) => (d.conductores.some((c) => c.clave === o.clave) ? d : { ...d, conductores: [...d.conductores, { id, clave: o.clave, rol: "titular", unidadCodigo: null }] }));
@@ -97,6 +98,7 @@ export default function SeccionConductores({ p, opciones, recargarOpciones, refs
     <Seccion id="conductores" titulo="Conductores"
       subtitulo={doc.conductores.length ? `${doc.conductores.length - relevo} titular${doc.conductores.length - relevo === 1 ? "" : "es"} · ${relevo} de relevo` : "Elige los conductores, propios o tercerizados, y la unidad que maneja cada uno."}>
       <ListaHallazgos hallazgos={generalesDe(hallazgos, "conductores")} irA={p.irA} />
+      <ExigenciasBases requisitos={doc.requisitos} revision={p.revision} tipos={(t) => t.startsWith("conductor") || t === "prohibe_subcontratacion"} irA={p.irA} />
       {terceroSinMigracion && (
         <Nota tono="ambar">Los documentos de los conductores tercerizados todavía no se pueden guardar ni leer: corre {SQL_LICITACIONES.accesorias} en Supabase → SQL Editor. Mientras tanto no se afirma que les falte nada.</Nota>
       )}
@@ -155,6 +157,7 @@ export default function SeccionConductores({ p, opciones, recargarOpciones, refs
         <ol className="space-y-3">
           {orden.map((el, k) => (
             <TarjetaConductor key={el.id} p={p} el={el} k={k} orden={orden} refs={refs}
+              conAncla={orden.findIndex((x) => x.clave === el.clave) === k}
               c={ctx?.conductores[el.clave]} op={opPorClave.get(el.clave)} pendiente={pendiente(el.clave)}
               hallazgos={deSujeto(hallazgos, "conductor", el.clave)}
               opcionesUnidad={unidades.map((u) => ({ codigo: norm(u.codigo), rotulo: `${u.codigo || "sin código"}${ctx?.unidades[u.clave]?.placa ? ` · ${ctx.unidades[u.clave].placa}` : ""}` })).filter((x) => x.codigo)}
@@ -173,8 +176,10 @@ export default function SeccionConductores({ p, opciones, recargarOpciones, refs
 }
 
 // ══ Un conductor ═══════════════════════════════════════════════════════════════════
-function TarjetaConductor({ p, el, k, orden, refs, c, op, pendiente, hallazgos, opcionesUnidad, onCambiar, onMover, onQuitar, onDoc, onBorrar }: {
+function TarjetaConductor({ p, el, k, orden, refs, conAncla, c, op, pendiente, hallazgos, opcionesUnidad, onCambiar, onMover, onQuitar, onDoc, onBorrar }: {
   p: PasoProps; el: ConductorElegido; k: number; orden: ConductorElegido[]; refs: RefsRecurso | null;
+  /** Solo la primera tarjeta de una clave lleva el ancla (un repetido no puede tener el mismo id). */
+  conAncla: boolean;
   c: ConductorERP | undefined; op: OpcionConductor | undefined; pendiente: boolean; hallazgos: Hallazgo[];
   opcionesUnidad: { codigo: string; rotulo: string }[];
   onCambiar: (c: Partial<ConductorElegido>) => void; onMover: (dir: -1 | 1) => void; onQuitar: () => void;
@@ -201,7 +206,7 @@ function TarjetaConductor({ p, el, k, orden, refs, c, op, pendiente, hallazgos, 
   const licIni = refs?.inicio ? vigencia(vencLic, refs.inicio) : null;
 
   return (
-    <li id={anclaDe("conductor", el.id)} className={`scroll-mt-24 rounded-xl border p-3 ${prohibido ? "border-red-300 bg-red-50/60" : "border-gray-200 bg-white"}`}>
+    <li id={conAncla ? anclaDe("conductor", el.clave) : undefined} className={`scroll-mt-24 rounded-xl border p-3 ${prohibido ? "border-red-300 bg-red-50/60" : "border-gray-200 bg-white"}`}>
       <div className="flex flex-wrap items-start gap-2">
         <div className="w-28 flex-shrink-0">
           <select aria-label="Rol del conductor" disabled={soloLectura} value={el.rol} onChange={(e) => onCambiar({ rol: e.target.value as RolConductor })}

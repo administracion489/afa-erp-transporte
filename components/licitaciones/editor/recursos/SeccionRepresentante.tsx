@@ -99,10 +99,13 @@ export default function SeccionRepresentante({ p, hallazgos }: { p: PasoProps; h
             <div className="text-center text-xs text-gray-800">
               {derivado.firmaUrl ? <ImgPrivada src={derivado.firmaUrl} alt="" className="mx-auto h-12 object-contain" /> : <p className="text-gray-400">[sin firma]</p>}
               <div className="mx-auto mt-1 w-48 border-t border-gray-400 pt-1">
-                <p className="font-bold">{derivado.nombre || "—"}</p>
-                <p>DNI N° {derivado.dni || "—"}</p>
-                <p>{derivado.cargo || "—"}</p>
+                {derivado.nombre && <p className="font-bold">{derivado.nombre}</p>}
+                {derivado.dni && <p>DNI N° {derivado.dni}</p>}
+                {derivado.cargo && <p>{derivado.cargo}</p>}
               </div>
+              {(!derivado.nombre || !derivado.dni || !derivado.cargo) && (
+                <p className="mt-1 text-[11px] text-gray-500">Falta {[!derivado.nombre && "el nombre", !derivado.dni && "el DNI", !derivado.cargo && "el cargo"].filter(Boolean).join(", ")}: esa línea no sale.</p>
+              )}
             </div>
           )}
         </div>

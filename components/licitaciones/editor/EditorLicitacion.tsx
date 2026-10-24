@@ -166,9 +166,9 @@ export default function EditorLicitacion({ id }: { id: number }) {
 
   const irA = useCallback((p: Paso, a?: string | null) => {
     cambiarPaso(p);
-    if (a) setAncla({ ids: candidatosAncla(a, licActual()?.doc), n: ++nAncla.current });
+    if (a) setAncla({ ids: candidatosAncla(a), n: ++nAncla.current });
     else window.scrollTo({ top: 0, behavior: "smooth" });
-  }, [cambiarPaso, licActual]);
+  }, [cambiarPaso]);
 
   useEffect(() => {
     if (!ancla) return;

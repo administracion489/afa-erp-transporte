@@ -22,7 +22,7 @@ import { execFileSync } from "node:child_process";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import sharp from "sharp";
 import {
-  comprobarArchivos, emitirLicitacion, registrarEmision, storageDeDb, nombresUnicos, debeSubir, firmaDeFoto,
+  comprobarArchivos, emitirLicitacion, registrarEmision, nombresUnicos, debeSubir, firmaDeFoto,
   sha256Puro, sha256Hex, sha256DePartes, Sha256, hallazgosParaEmision, pesoFuentes, docTieneRelacionAdjuntos,
   TOPE_FUENTES_BYTES, ErrorDescarga,
   type DepsEmision, type ExtraEmision, type FoliosPorBloque, type StorageEmision, type ResultadoEmitir,
@@ -134,7 +134,7 @@ class StorageFalso implements StorageEmision {
   objetos = new Map<string, Uint8Array>();
   subidas = 0;
   urlMala = false;
-  async subir(bucket: string, ruta: string, bytes: Uint8Array, _ct: string) {
+  async subir(bucket: string, ruta: string, bytes: Uint8Array) {
     this.subidas++;
     const k = `${bucket}/${ruta}`;
     if (this.objetos.has(k)) return { error: "Ya hay un archivo en esa ruta: lo emitido no se sobrescribe.", url: null };
@@ -143,6 +143,7 @@ class StorageFalso implements StorageEmision {
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Fila = Record<string, any>;
 class DbFalsa {
   filas: Fila[] = [];
@@ -154,10 +155,11 @@ class DbFalsa {
   choqueUnaVez = false;
   storage?: unknown;
   from(tabla: string) {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
     if (tabla !== "licitacion_emisiones") throw new Error(`tabla inesperada ${tabla}`);
     return {
-      select(_cols: string) {
+      select() {
         const f: Record<string, unknown> = {};
         const q = {
           eq(c: string, v: unknown) { f[c] = v; return q; }, order() { return q; }, limit() { return q; },
@@ -334,6 +336,9 @@ sec("1. Helpers puros");
   check(hallazgosParaEmision({ hallazgos: [] }, [{ ...hs[0] }]).length === 1, "un aceptado que la revisión ya no da se conserva");
   check(pesoFuentes({ a: { url: "a", ok: true, formato: "pdf", paginas: 1, bytes: 10, sha256: "x" }, b: { url: "b", ok: false, codigo: "archivo_externo", detalle: "" } }) === 10, "pesoFuentes suma solo lo bajado");
   check(docTieneRelacionAdjuntos(licitacion().doc) && !docTieneRelacionAdjuntos(licitacion({ relacion: false }).doc), "docTieneRelacionAdjuntos");
+  const fuente = fs.readFileSync(new URL("../lib/licitaciones/emitir.ts", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  check(!/ignoreEncryption/.test(fuente), "el código (sin comentarios) no usa ignoreEncryption (R11)");
+  check(!/emitido_por\s*:/.test(fuente.split("export async function registrarEmision")[1]?.split("const d = data")[0] ?? "x"), "la fila que se inserta no arma emitido_por");
   try {
     const rev = await import("../lib/licitaciones/revision");
     check((rev as { MAX_BYTES_EXPEDIENTE?: number }).MAX_BYTES_EXPEDIENTE === TOPE_FUENTES_BYTES, "TOPE_FUENTES_BYTES ≡ MAX_BYTES_EXPEDIENTE de la revisión (R12, un solo número)");

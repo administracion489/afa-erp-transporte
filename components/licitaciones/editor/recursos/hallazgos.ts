@@ -7,7 +7,7 @@
 // unidad que la lista de la flota sí trae. Mientras dure eso, la pantalla dice «comprobando…».
 
 import { anclaDe } from "../contrato-editor";
-import type { DocLicitacion, Hallazgo } from "@/lib/licitaciones/tipos";
+import type { Hallazgo } from "@/lib/licitaciones/tipos";
 
 export type GrupoRecursos = "unidades" | "conductores" | "experiencia" | "contactos" | "representante";
 export const GRUPOS_RECURSOS: readonly GrupoRecursos[] = ["unidades", "conductores", "experiencia", "contactos", "representante"];
@@ -55,17 +55,15 @@ export function hallazgosDelPaso(hs: readonly Hallazgo[] | null | undefined, pen
   });
 }
 
-/** El ancla del elemento del doc al que lleva el hallazgo (o la de su sección). */
-export function anclaDeHallazgo(h: Hallazgo, doc: DocLicitacion): string | null {
-  if (h.sujeto.tipo === "unidad") {
-    const el = doc.unidades.find((u) => u.clave === h.sujeto.id);
-    return el ? anclaDe("unidad", el.id) : "unidades";
-  }
-  if (h.sujeto.tipo === "conductor") {
-    const el = doc.conductores.find((c) => c.clave === h.sujeto.id);
-    return el ? anclaDe("conductor", el.id) : "conductores";
-  }
-  if (h.sujeto.tipo === "experiencia") return anclaDe("exp", h.sujeto.id);
+/**
+ * El ancla del elemento al que lleva el hallazgo (o la de su panel). Misma forma que contrato-editor:
+ * en unidades y conductores el id es la ClaveRecurso del sujeto; si el elemento ya no está, el editor
+ * cae al panel.
+ */
+export function anclaDeHallazgo(h: Hallazgo): string | null {
+  if (h.sujeto.tipo === "unidad") return anclaDe("unidad", h.sujeto.id);
+  if (h.sujeto.tipo === "conductor") return anclaDe("conductor", h.sujeto.id);
+  if (h.sujeto.tipo === "experiencia") return anclaDe("experiencia", h.sujeto.id);
   return grupoDe(h);
 }
 

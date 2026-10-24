@@ -138,7 +138,7 @@ export default function SeccionExperiencia({ p, catalogo, recargarCatalogo, hall
               const e = expDe(id);
               const hs = deSujeto(hallazgos, "experiencia", String(id));
               return (
-                <li key={id} id={anclaDe("exp", id)} className="scroll-mt-24 rounded-xl border border-gray-200 p-2.5">
+                <li key={id} id={anclaDe("experiencia", id)} className="scroll-mt-24 rounded-xl border border-gray-200 p-2.5">
                   <div className="flex flex-wrap items-start gap-2">
                     <span className="mt-0.5 w-6 text-center text-xs font-bold text-gray-500">{k + 1}</span>
                     <div className="min-w-0 flex-1">

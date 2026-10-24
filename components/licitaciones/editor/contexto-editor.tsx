@@ -16,7 +16,7 @@ export type FaseGuardado =
   | "solo_lectura"; // archivada o sin permiso de escritura
 
 export type DestinoAncla = {
-  /** Ids del DOM candidatos (navegacion.ts → candidatosAncla), del más preciso al más general. */
+  /** Ids del DOM candidatos (navegacion.ts → candidatosAncla): el elemento y, de respaldo, su panel. */
   ids: string[];
   /** Cambia en cada navegación, aunque el destino sea el mismo. */
   n: number;
