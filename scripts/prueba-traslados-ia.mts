@@ -3189,6 +3189,65 @@ seccion("28. Hallazgo 5: la huella de lo que se imprime, al crear y al reusar; e
     cot.destino = "Miraflores (editado)";
     const r = await reusar(sb);
     ok(r.cotizacion?.yaEnviada === true && !r.envioPendiente, "9: una cotización ya enviada sigue respondiendo «ya te la envié»");
+    // Sin `editada_at` (la base de la prueba no la tiene: cuenta como null, «ningún usuario la tocó»), los importes de siempre.
+    ok(!!r.cotizacion?.total && JSON.parse(r.respuestaModelo).cotizacion?.total === r.cotizacion?.total, "9: …con su total, como hoy (corregida por el servidor: sin_persona)");
+  }
+  {
+    // (10) Ya ENVIADA y una persona la CORRIGIÓ hace poco (lib/traslados/cotizacion-corregida.ts): el
+    // «ya te la envié» SIN importes y una nota; no deriva. Pasada la pausa, con el total.
+    const H = 3_600_000;
+    const CC = await import("../lib/traslados/cotizacion-corregida-datos");
+    ok(CD.huellaImprimible === CC.huellaImprimible && CD.filaEditada === CC.filaEditada, "10: cotizar-ia-datos reexporta la huella de cotizacion-corregida-datos (la misma función)");
+    ok(!(C.CAMPOS_HUELLA as readonly string[]).includes("editada_at") && C.canonImprimible({ ...leida, editada_at: "2026-10-19T15:00:00Z", editada_por: "u-1" }) === h0, "10: editada_at y editada_por no entran a la huella");
+    const enviada = async () => {
+      const { sb, r0, cot, acc } = await crear();
+      await enviarCotizacionTraslado(sb as any, { accionId: acc.id, por: "automatico", bytes: r0.envioPendiente!.bytes, nombre: r0.envioPendiente!.nombre, caption: r0.envioPendiente!.caption }, depsEnvio);
+      return { sb, cot, acc };
+    };
+    const conPausa = (sb: SbFalso, pausa: { horas: number; reactivadaAt: string | null } | null = { horas: 12, reactivadaAt: null }) =>
+      cotizarTrasladoIA({ ...ctxDe(sb, "cv-1", "ct-1"), ...(pausa ? { pausa } : {}) }, pedidoIA, depsH);
+    const notas = (sb: SbFalso) => sb.t("crm_notas").map((n) => String(n.texto));
+    const estiloU = { tratamiento: "usted" as const, preguntas: "todo_junto" as const };
+    {
+      const { sb, cot } = await enviada();
+      cot.hora_ida = "07:00";
+      cot.editada_at = new Date(reloj - H).toISOString();
+      const r = await conPausa(sb);
+      const j = JSON.parse(r.respuestaModelo);
+      ok(r.cotizacion?.yaEnviada === true && !r.cotizacion?.total && !r.cotizacion?.validez && r.cotizacion?.figuras.length === 0 && !r.derivar && !r.envioPendiente,
+        `10a: corregida hace 1 h → «ya te la envié» sin total ni validez, sin derivar (${JSON.stringify(r.cotizacion)})`);
+      ok(j.cotizacion?.envio === "ya_enviada" && j.cotizacion?.total === undefined && /sin mencionar importes/.test(j.instruccion), "10a: al modelo tampoco le llegan los importes");
+      const final = E.textoFinalTraslado("El total es S/ 999", { accion: r.accion, cotizacion: r.cotizacion }, { derivacion: "d", estilo: estiloU });
+      ok(final.startsWith(`La cotización N° ${r.cotizacion!.numero} de su traslado ya se la envié por este chat.`) && !/S\/|US\$|IGV|total/i.test(final), `10a: el texto del turno no trae ningún importe («${final}»)`);
+      ok(notas(sb).some((n) => n.startsWith("🕒") && n.includes("los importes de la cotización") && n.includes("pausa de 12 h")), "10a: la nota para el ejecutivo dice qué no se repitió y hasta cuándo");
+      ok(!sb.t("crm_conversaciones").find((c) => c.id === "cv-1")?.ia_pausada, "10a: la IA no se pausa");
+      // Sin la pausa del turno: la de por defecto (12 h).
+      const rD = await conPausa(sb, null);
+      ok(rD.cotizacion?.yaEnviada === true && !rD.cotizacion?.total, "10a: sin la pausa del turno, las 12 h por defecto: tampoco repite el total");
+      // Reactivada DESPUÉS de la corrección: el total de siempre.
+      const rR = await conPausa(sb, { horas: 12, reactivadaAt: new Date(reloj - 10 * 60_000).toISOString() });
+      ok(!!rR.cotizacion?.total && rR.cotizacion.figuras.length > 0, "10a: reactivada después de la corrección → con el total");
+      // Pasada la pausa: con el total.
+      cot.editada_at = new Date(reloj - 13 * H).toISOString();
+      const rP = await conPausa(sb);
+      ok(!!rP.cotizacion?.total && JSON.parse(rP.respuestaModelo).cotizacion?.total === rP.cotizacion?.total, "10a: pasadas las 12 h → con el total, como siempre");
+      // Pausa apagada: con el total aunque sea de hace 1 h.
+      cot.editada_at = new Date(reloj - H).toISOString();
+      ok(!!(await conPausa(sb, { horas: 0, reactivadaAt: null })).cotizacion?.total, "10a: con la pausa apagada (0 h) → con el total");
+    }
+    {
+      // Sin la columna (cotizaciones-10 sin correr) y corregida: no se sabe cuándo → sin el total.
+      const { sb, cot } = await enviada();
+      cot.hora_ida = "07:00";
+      sb.faltan.cotizaciones = ["editada_at"];
+      const r = await conPausa(sb);
+      ok(r.cotizacion?.yaEnviada === true && !r.cotizacion?.total && notas(sb).some((n) => n.includes("cotizaciones-10-actividad-ejecutivo.sql")), "10b: sin la columna → sin el total, y la nota nombra la migración");
+      // Intacta (la huella coincide) aunque falte la columna: el total de siempre, y no se lee editada_at.
+      cot.hora_ida = pedidoIA.hora_servicio;
+      const r2 = await conPausa(sb);
+      ok(!!r2.cotizacion?.total, "10b: intacta → con el total aunque falte la columna (no hace falta leerla)");
+      sb.faltan.cotizaciones = [];
+    }
   }
 
   // ── Segunda revisión S1 · B: la descripción que ARMA EL CÓDIGO no se juzga entera ──

@@ -16,7 +16,7 @@ import {
   aperturaSiguiente, atencionValida, proximaAtencion, sumarMinutosAtencion, ultimoInstanteAtencionAntes, type Atencion,
 } from "../lib/crm-ia-atencion";
 import {
-  MARGEN_DEFECTO_MIN, MOTIVOS_ELEGIBILIDAD, MOTIVOS_TIEMPO, MOTIVO_ORDEN, PLAZO_CONFIRMACION_DEFECTO_MIN,
+  MARGEN_DEFECTO_MIN, MOTIVOS_CORRECCION, MOTIVOS_ELEGIBILIDAD, MOTIVOS_TIEMPO, MOTIVO_ORDEN, PLAZO_CONFIRMACION_DEFECTO_MIN,
   confirmarAntesDe, elegibilidadDeReserva, frasePlazo, ordenDeReserva, ordenDeSolicitud, plazosDe, type MotivoOrden,
 } from "../lib/traslados/reserva-orden";
 import { normalizarConfigReserva, type ConfigReserva } from "../lib/traslados/reserva-pago";
@@ -244,7 +244,9 @@ const visto = (a: string) => vistas.add(a);
   t("todos los motivos de elegibilidad", ["zona_sin_envio", "cotizacion_no_enviada", "cotizacion_vencida", "servicio_pasado", "sin_adelanto_config", "sin_cuentas", "cuentas_distintas", "perfil_sin_configurar", "politica_sospechosa"].every((m) => todo.includes(m as never)));
   t("crédito: credito y no sin_adelanto_config ni sin_cuentas", (() => { const c = elegibilidadDeReserva({ ...base, credito: true, adelantoPct: null, cuentas: 0 }); return c.includes("credito") && !c.includes("sin_adelanto_config") && !c.includes("sin_cuentas"); })());
   t("sin_comprobar cuenta como cuentas_distintas", elegibilidadDeReserva({ ...base, cuentasFrente: "sin_comprobar" }).includes("cuentas_distintas"));
-  const todos = [...MOTIVOS_ELEGIBILIDAD, ...MOTIVOS_TIEMPO];
+  // `cotizacion_corregida` no lo pone ordenDeReserva (lo agrega quien crea la solicitud), pero va a la tarjeta y al correo igual.
+  const todos = [...MOTIVOS_ELEGIBILIDAD, ...MOTIVOS_TIEMPO, ...MOTIVOS_CORRECCION];
+  t("cotizacion_corregida como elegibilidad no la acepta el orden (no es suyo)", !ordenDeReserva({ ahoraMs: limaAUtcMs("2026-10-22", "10:00")!, inicioMs: limaAUtcMs("2026-11-01", "10:00"), atencion: { activa: true, dias: [1, 2, 3, 4, 5, 6], desde: "09:00", hasta: "18:00" } as any, cfg: { adelantoPct: 50 } as any, elegibilidad: ["cotizacion_corregida" as MotivoOrden] }).motivos.includes("cotizacion_corregida"));
   t("todo motivo tiene su texto para el ejecutivo", todos.every((m) => typeof MOTIVO_ORDEN[m] === "string" && MOTIVO_ORDEN[m].length > 10));
   t("todo motivo cumple el CHECK de la base [a-z_]{2,40}", todos.every((m) => /^[a-z_]{2,40}$/.test(m)));
 }

@@ -152,16 +152,16 @@ export function elegirCotizacion(candidatas: readonly CotizacionCandidata[] | nu
 
 // ── 4. Lo que se le devuelve al modelo (lista blanca) ────────────────────────
 
-export type AccionReservar = "pedir_pago" | "confirmar_disponibilidad" | "derivar" | "recotizar" | "elegir_cotizacion" | "sin_cotizacion" | "ya_solicitada";
+export type AccionReservar = "pedir_pago" | "confirmar_disponibilidad" | "derivar" | "recotizar" | "elegir_cotizacion" | "sin_cotizacion" | "ya_solicitada" | "cotizacion_corregida";
 export type AccionReportarPago = "comprobante_registrado" | "pedir_comprobante" | "ya_registrado" | "derivar";
-export type AccionPoliticas = "enviar_politicas" | "derivar";
+export type AccionPoliticas = "enviar_politicas" | "derivar" | "cotizacion_corregida";
 export type AccionCancelar = "cancelada_sin_pago" | "cancelacion_registrada" | "sin_reserva" | "derivar";
 export type AccionReserva = AccionReservar | AccionReportarPago | AccionPoliticas | AccionCancelar;
 
 export const ACCIONES_POR_HERRAMIENTA: Record<HerramientaReserva, readonly AccionReserva[]> = {
-  reservar_traslado: ["pedir_pago", "confirmar_disponibilidad", "derivar", "recotizar", "elegir_cotizacion", "sin_cotizacion", "ya_solicitada"],
+  reservar_traslado: ["pedir_pago", "confirmar_disponibilidad", "derivar", "recotizar", "elegir_cotizacion", "sin_cotizacion", "ya_solicitada", "cotizacion_corregida"],
   reportar_pago_traslado: ["comprobante_registrado", "pedir_comprobante", "ya_registrado", "derivar"],
-  politicas_reserva: ["enviar_politicas", "derivar"],
+  politicas_reserva: ["enviar_politicas", "derivar", "cotizacion_corregida"],
   cancelar_reserva_traslado: ["cancelada_sin_pago", "cancelacion_registrada", "sin_reserva", "derivar"],
 };
 
@@ -184,6 +184,7 @@ export const INSTRUCCION_RESERVA: Record<AccionReserva, string> = {
   pedir_comprobante: `No hay una foto o captura nueva del comprobante en el chat: el sistema le pide que la envíe. Tu texto no se envía. ${NO_ESCRIBAS}`,
   ya_registrado: `Ese comprobante ya se había registrado: dile al cliente que lo estamos verificando con el banco. ${NO_ESCRIBAS} Nunca digas que el pago está confirmado.`,
   enviar_politicas: "El sistema le envía las políticas al pie de la letra en este turno: tu texto no se envía. No las resumas ni las cambies.",
+  cotizacion_corregida: `Un ejecutivo corrigió esa cotización y la está revisando: el sistema le avisa al cliente que un ejecutivo le confirma los detalles por este chat. Tu texto no se envía. ${NO_ESCRIBAS} No le envíes las políticas ni le pidas el pago.`,
   cancelada_sin_pago: `El sistema le confirma al cliente que se anuló su pedido de reserva: tu texto no se envía. ${NO_ESCRIBAS}`,
   cancelacion_registrada: `El sistema le confirma al cliente que registró su pedido de cancelación y que un ejecutivo le dirá lo que corresponde: tu texto no se envía. No prometas devoluciones. ${NO_ESCRIBAS}`,
   sin_reserva: `No hay una reserva de traslado en curso en este chat. Si el cliente quiere cancelar otro servicio, usa escalar_a_humano. ${NO_ESCRIBAS}`,

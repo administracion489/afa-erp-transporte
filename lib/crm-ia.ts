@@ -30,7 +30,7 @@ import { validarEntrada } from "@/lib/traslados/api";
 import { simularTrasladoConCatalogo } from "@/lib/traslados/servicio";
 import { fechaLima } from "@/lib/alertas-horario";
 import { faltaColumna } from "@/lib/columna-faltante";
-import { inicioVentanaHumano, inicioConteoTurnos } from "@/lib/crm-ia-reactivacion";
+import { inicioVentanaHumano, inicioConteoTurnos, horasPausaHumano as horasPausaDeAgente } from "@/lib/crm-ia-reactivacion";
 import { primerNombreSeguro, type IdiomaTexto } from "@/lib/traslados/texto-libre";
 import { limpiarTextoModelo, saludoDeBooleano, saludoDelTurno, textosSinContestar, type SaludoDelTurno } from "@/lib/crm-ia-mensaje";
 import { CONTESTA, MOTIVO_ULTIMO, juzgarUltimo, leerMarca, marcaVigente, ordenarRafaga, type MarcaRespuesta } from "@/lib/crm-ia-rafaga";
@@ -180,9 +180,10 @@ export function mensajeDerivacion(
 }
 
 /** Horas que la IA se aparta cuando contesta una persona del equipo. La MISMA lectura con que el
- *  motor decide (responderConIAInterno) y con que el prompt lo dice: 12 si no hay un número. */
+ *  motor decide (responderConIAInterno) y con que el prompt lo dice: 12 si no hay un número. Vive en
+ *  lib/crm-ia-reactivacion.ts (pura): la reserva de traslados la usa sin importar este módulo. */
 export function horasPausaHumano(agente: AgenteIAConfig | null | undefined): number {
-  return Number.isFinite(Number(agente?.pausa_humano_horas)) ? Number(agente?.pausa_humano_horas) : 12;
+  return horasPausaDeAgente(agente);
 }
 
 /** El idioma por defecto de las respuestas (`crm_agentes_ia.idioma`). */
@@ -340,6 +341,12 @@ type Ctx = {
    * devuelve cada herramienta de reserva en el turno va a `resultados` (de ahí sale el texto final).
    */
   reserva?: { activa: boolean; cfg: ConfigReserva; turno: { n: number }; resultados: ResultadoReservaIA[] };
+  /**
+   * La pausa tras la actividad de una persona (`pausa_humano_horas`) y la reactivación del chat
+   * (`ia_reactivada_at`), las MISMAS con que este turno decidió contestar: la cotización de traslado que
+   * una persona corrigió se juzga con ellas (lib/traslados/cotizacion-corregida.ts).
+   */
+  pausa?: { horas: number; reactivadaAt: string | null };
 };
 
 /** El número peruano con que la PRUEBA del agente (/crm/agente) cotiza traslados. No es de nadie. */
@@ -572,6 +579,7 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
             // El modo de preguntar sale de los ajustes del agente, y el idioma del código: nunca del modelo.
             preguntas: ajustesDe(ctx.agente).preguntas,
             ...(ctx.idiomaIA ? { idioma: ctx.idiomaIA } : {}),
+            ...(ctx.pausa ? { pausa: ctx.pausa } : {}),
           },
           input,
         );
@@ -588,7 +596,7 @@ async function ejecutarTool(name: string, input: any, ctx: Ctx): Promise<string>
           return respuestaReservaParaModelo("derivar");
         const cr: CtxReservaIA = {
           sb, conv, contacto, remitente: ctx.remitente, agente: ctx.agente, modoAuto: ctx.modoAuto === true,
-          cfg: ctx.reserva.cfg, turno: ctx.reserva.turno,
+          cfg: ctx.reserva.cfg, turno: ctx.reserva.turno, ...(ctx.pausa ? { pausa: ctx.pausa } : {}),
         };
         const fn = name === "reservar_traslado" ? reservarTrasladoIA
           : name === "reportar_pago_traslado" ? reportarPagoIA
@@ -1184,7 +1192,7 @@ async function responderConIAInterno(
     // Tras una reactivación se cuentan solo los turnos posteriores: si no, el hilo que ya llegó al
     // límite se volvería a pausar solo en el siguiente mensaje.
     if (agente.max_turnos_auto > 0) {
-      const desdeTurnos = inicioConteoTurnos(reactivadaAt);
+      const desdeTurnos = inicioConteoTurnos(reactivadaAt, Date.now());
       let qTurnos = sb
         .from("crm_mensajes")
         .select("id", { count: "exact", head: true })
@@ -1315,6 +1323,8 @@ async function responderConIAInterno(
   const ctx: Ctx = {
     sb, contacto, conv, agente, escalado: { v: false },
     remitente, modoAuto, consultasTurno: { n: 0 }, traslados, cotizacionTraslado: null,
+    // La misma pausa y la misma reactivación con que arriba se decidió si la IA contesta.
+    pausa: { horas: horasPausaHumano(agente), reactivadaAt },
     ...(traslados ? { idiomaIA: { cliente: idiomaIA.cliente, ingles: idiomaIA.ingles } } : {}),
     ...(reservaActiva ? { reserva: { activa: true, cfg: cfgIA.reserva, turno: { n: 0 }, resultados: [] } } : {}),
   };

@@ -811,6 +811,25 @@ function castellanoPago(P: any, limaAUtcMs: (f: string, h: string) => number | n
   t("el barrido de las cuentas probó cuentas de verdad", barridas === 32 && cuentasEnMensaje(null, empresa, "PEN", "en").lineas.length === 2);
 }
 
+// ── 13. T12 — la cotización se corrigió hace poco (lib/traslados/cotizacion-corregida.ts) ──
+// Sin importes, sin políticas, sin una hora que prometer; de usted, de tú y en inglés (una versión).
+{
+  const { mencionaDinero } = await import("../lib/traslados/texto-libre");
+  const U: EstiloMensajes = { tratamiento: "usted", preguntas: "todo_junto" };
+  const T: EstiloMensajes = { tratamiento: "tu", preguntas: "una_por_mensaje" };
+  const E: EstiloMensajes = { tratamiento: "usted", preguntas: "todo_junto", idioma: "en" };
+  const ET: EstiloMensajes = { tratamiento: "tu", preguntas: "todo_junto", idioma: "en" };
+  const m = PAGO.mensajeCotizacionActualizada;
+  t("T12 de usted", m("00736", U) === "La cotización N° 00736 se actualizó. Un ejecutivo le confirma los detalles por este chat.");
+  t("T12 de tú", m("00736", T) === "La cotización N° 00736 se actualizó. Un ejecutivo te confirma los detalles por este chat.");
+  t("T12 en inglés, una versión", m("00736", E) === "Quotation No. 00736 has been updated. One of our agents will confirm the details with you in this chat." && m("00736", ET) === m("00736", E));
+  t("T12 sin número", m(null, U) === "Su cotización se actualizó. Un ejecutivo le confirma los detalles por este chat." && m("  ", T).startsWith("Tu cotización se actualizó.") && m(undefined, E).startsWith("Your quotation has been updated."));
+  const todos = [U, T, E].flatMap((e) => ["00736", null].map((n) => m(n, e)));
+  t("T12 no habla de dinero (con castellano ∪ inglés), ni promete una hora, ni trae otras cifras", todos.every((x) => !mencionaDinero(x, "en") && !/\d{1,2}:\d\d|hora|hour/i.test(x) && (x.match(/\d+/g) ?? []).every((d) => d === "00736")));
+  const palabra = (xs: string[]) => new RegExp(`(?<![\\p{L}\\p{N}])(?:${xs.join("|")})(?![\\p{L}\\p{N}])`, "iu");
+  t("T12 de usted no tutea; de tú no dice usted", !palabra(["tú", "tu", "te", "ti"]).test(m("1", U)) && !palabra(["usted", "su", "le"]).test(m("1", T)) && !palabra(["usted", "su", "le"]).test(m(null, T)));
+}
+
 if (fallas.length) for (const f of fallas) console.log("✗", f);
 console.log(`\n${ok} OK · ${mal} mal`);
 if (mal > 0) process.exit(1);

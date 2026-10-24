@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 // lib/traslados/reserva-pago.ts — La RESERVA de un traslado que cotizó la IA del CRM: cuánto es el
 // adelanto, a qué cuentas se paga, qué le falta a cada solicitud y quién lo tiene que hacer, el
-// comprobante del cargo retenido y los TEXTOS que le manda el código al cliente (T1–T11). PURO: no
+// comprobante del cargo retenido y los TEXTOS que le manda el código al cliente (T1–T12). PURO: no
 // lee la base, no manda nada.
 //
 // LAS REGLAS QUE NO SE AFLOJAN:
@@ -796,7 +796,7 @@ export function patchCargoRecalculado(actual: FacturaCargoActual, x: { solicitud
   };
 }
 
-// ── 8. Los textos que le manda el código al cliente (T1–T11) ─────────────────
+// ── 8. Los textos que le manda el código al cliente (T1–T12) ─────────────────
 // Cada uno de usted Y de tú, escritos enteros, y en inglés (`estilo.idioma === "en"`) una versión
 // más, también entera. Ningún dato de la empresa: las cuentas y el correo llegan de la configuración.
 // El código los arma; el modelo nunca escribe un importe ni una cuenta.
@@ -1198,6 +1198,19 @@ export function mensajePagoNoEncontrado(estilo: EstiloMensajes): string {
   return esTu(estilo)
     ? "Todavía no encontramos tu pago en el banco. ¿Nos confirmas la fecha, el banco y el número de operación, o nos envías otra captura del comprobante?"
     : "Todavía no encontramos su pago en el banco. ¿Nos confirma la fecha, el banco y el número de operación, o nos envía otra captura del comprobante?";
+}
+
+/**
+ * T12 — la cotización se CORRIGIÓ hace poco (lib/traslados/cotizacion-corregida.ts): lo que pidió el
+ * cliente (el pedido del adelanto, las políticas) se lo da un ejecutivo. Sin importes, sin políticas y
+ * sin una hora: al cliente no se le promete un plazo. Con el número de la cotización si lo hay.
+ */
+export function mensajeCotizacionActualizada(numero: string | null | undefined, estilo: EstiloMensajes): string {
+  const n = txt(numero);
+  if (esEn(estilo)) return `${n ? `Quotation No. ${n}` : "Your quotation"} has been updated. One of our agents will confirm the details with you in this chat.`;
+  return esTu(estilo)
+    ? `${n ? `La cotización N° ${n}` : "Tu cotización"} se actualizó. Un ejecutivo te confirma los detalles por este chat.`
+    : `${n ? `La cotización N° ${n}` : "Su cotización"} se actualizó. Un ejecutivo le confirma los detalles por este chat.`;
 }
 
 /** T10 — la guarda: el texto del modelo habló de dinero con una cotización de traslado en el chat. */

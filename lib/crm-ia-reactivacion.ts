@@ -13,19 +13,62 @@
 // Una persona que responde después de reactivar vuelve a apartar a la IA, como siempre.
 // ──────────────────────────────────────────────────────────────────────────────
 
-/** ISO desde el que se buscan respuestas humanas: el más reciente entre «hace N horas» y la reactivación. */
-export function inicioVentanaHumano(ahoraMs: number, horas: number, reactivadaAt?: string | null): string {
-  const ventana = ahoraMs - horas * 3600_000;
+/**
+ * Cuánto puede adelantarse una reactivación respecto de «ahora» y seguir contando (el desfase entre el
+ * reloj del servidor que la escribió y el que la lee). NO medido: un margen holgado para un reloj.
+ * Una reactivación más en el futuro que esto no es una reactivación: la escribe el servidor con su
+ * `now()` (/api/crm/ia/reactivar), así que una fecha de 2099 solo pudo ponerla alguien a mano para que
+ * la pausa por respuesta humana dejara de contar (supabase/crm-ia-reactivacion-02-solo-servidor.sql
+ * cierra la puerta; esto es el respaldo del código). Se ignora: como si no hubiera reactivación.
+ */
+export const MARGEN_RELOJ_REACTIVACION_MS = 5 * 60_000;
+
+/** La reactivación en ms, o null si no hay, no se entiende o está más en el futuro que el margen. */
+export function reactivacionValida(reactivadaAt: string | null | undefined, ahoraMs: number): number | null {
   const r = reactivadaAt ? Date.parse(reactivadaAt) : NaN;
-  return new Date(Number.isFinite(r) && r > ventana ? r : ventana).toISOString();
+  if (!Number.isFinite(r)) return null;
+  if (Number.isFinite(ahoraMs) && r > ahoraMs + MARGEN_RELOJ_REACTIVACION_MS) return null;
+  return r;
 }
 
-/** ISO desde el que se cuentan los turnos de IA (null = toda la conversación). */
-export function inicioConteoTurnos(reactivadaAt?: string | null): string | null {
+/**
+ * ISO desde el que se buscan respuestas humanas: el más reciente entre «hace N horas» y la reactivación.
+ * Una reactivación más en el futuro que `MARGEN_RELOJ_REACTIVACION_MS` se ignora (la ventana de siempre).
+ */
+export function inicioVentanaHumano(ahoraMs: number, horas: number, reactivadaAt?: string | null): string {
+  const ventana = ahoraMs - horas * 3600_000;
+  const r = reactivacionValida(reactivadaAt, ahoraMs);
+  return new Date(r != null && r > ventana ? r : ventana).toISOString();
+}
+
+/**
+ * ISO desde el que se cuentan los turnos de IA (null = toda la conversación). Con `ahoraMs`, una
+ * reactivación más en el futuro que el margen se ignora (si no, ningún turno contaría y el límite no
+ * pausaría nunca); sin él, la lectura de siempre.
+ */
+export function inicioConteoTurnos(reactivadaAt?: string | null, ahoraMs?: number): string | null {
+  if (typeof ahoraMs === "number") {
+    const r = reactivacionValida(reactivadaAt, ahoraMs);
+    return r != null ? new Date(r).toISOString() : null;
+  }
   return reactivadaAt && Number.isFinite(Date.parse(reactivadaAt)) ? new Date(Date.parse(reactivadaAt)).toISOString() : null;
 }
 
 /** ¿Al reactivar hay un mensaje del cliente esperando respuesta? Solo si el ÚLTIMO del hilo es suyo. */
 export function hayClienteEsperando(ultimo: { direccion?: string | null } | null | undefined): boolean {
   return ultimo?.direccion === "entrante";
+}
+
+/** Las horas que la IA se aparta tras la actividad de una persona cuando el agente no dice un número. */
+export const HORAS_PAUSA_DEFECTO = 12;
+
+/**
+ * Horas que la IA se aparta cuando actúa una persona del equipo (`crm_agentes_ia.pausa_humano_horas`):
+ * la MISMA lectura con que el motor decide si contesta (lib/crm-ia.ts, que la reexporta), con que el
+ * prompt lo dice y con que la reserva de traslados juzga una cotización corregida
+ * (lib/traslados/cotizacion-corregida.ts). 12 si no hay un número; 0 (o menos) apaga la pausa. Un
+ * `null` es 0, como siempre (`Number(null)`): lo fija la matriz del prompt.
+ */
+export function horasPausaHumano(agente: { pausa_humano_horas?: unknown } | null | undefined): number {
+  return Number.isFinite(Number(agente?.pausa_humano_horas)) ? Number(agente?.pausa_humano_horas) : HORAS_PAUSA_DEFECTO;
 }
