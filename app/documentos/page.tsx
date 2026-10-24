@@ -3,6 +3,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { EnlacePrivado, firmarEnNavegador } from "@/components/ArchivoPrivado";
+// La lista de categorías es la ÚNICA del ERP (la comparten /documentos, ELIA y el legajo de las
+// licitaciones): una categoría escrita desde otra pantalla tiene que poder filtrarse y leerse aquí.
+import {
+  GRUPOS_CATEGORIA,
+  etiquetaCategoria,
+  estadoParaColumna,
+} from "@/lib/documentos-empresa-categorias";
 
 type Documento = {
   id: number;
@@ -101,20 +108,6 @@ export default function DocumentosPage() {
       .toLowerCase();
   };
 
-  const calcularEstado = (fecha: string | null) => {
-    if (!fecha) return "vigente";
-
-    const hoy = new Date();
-    const vencimiento = new Date(fecha);
-    const dias = Math.ceil(
-      (vencimiento.getTime() - hoy.getTime()) / (1000 * 60 * 60 * 24)
-    );
-
-    if (dias < 0) return "vencido";
-    if (dias <= 30) return "por_vencer";
-    return "vigente";
-  };
-
   const subirArchivo = async () => {
     if (!archivo) return { url: null, nombre: null };
 
@@ -160,7 +153,9 @@ export default function DocumentosPage() {
       return;
     }
 
-    const estado = calcularEstado(form.fecha_vencimiento || null);
+    // Se sigue llenando la columna `estado`, pero nadie la LEE para decidir: se queda vieja al día
+    // siguiente. Días en calendario de Lima (con `new Date()` el día cambiaba a las 19:00).
+    const estado = estadoParaColumna(form.fecha_vencimiento || null);
 
     const payload = {
       titulo: form.titulo,
@@ -275,10 +270,12 @@ export default function DocumentosPage() {
     return "Empresa";
   };
 
+  // El estado que se PINTA (y con el que se filtra y se cuenta) se deriva del vencimiento al pintar,
+  // nunca de la columna guardada.
   const documentosActualizados = useMemo(() => {
     return documentos.map((d) => ({
       ...d,
-      estado: calcularEstado(d.fecha_vencimiento),
+      estado: estadoParaColumna(d.fecha_vencimiento),
     }));
   }, [documentos]);
 
@@ -301,17 +298,15 @@ export default function DocumentosPage() {
 
   const privados = documentosActualizados.filter((d) => d.privado).length;
 
-  const categorias = [
-    "contrato",
-    "guia_remision",
-    "sst",
-    "capacitacion",
-    "permiso",
-    "legal",
-    "factura",
-    "interno",
-    "otro",
-  ];
+  const opcionesCategoria = GRUPOS_CATEGORIA.map((g) => (
+    <optgroup key={g.grupo} label={g.grupo}>
+      {g.codigos.map((cat) => (
+        <option key={cat} value={cat}>
+          {etiquetaCategoria(cat)}
+        </option>
+      ))}
+    </optgroup>
+  ));
 
   return (
     <main className="p-6 space-y-6">
@@ -361,11 +356,7 @@ export default function DocumentosPage() {
             value={form.categoria}
             onChange={(e) => setForm({ ...form, categoria: e.target.value })}
           >
-            {categorias.map((cat) => (
-              <option key={cat} value={cat}>
-                {cat.replace("_", " ").toUpperCase()}
-              </option>
-            ))}
+            {opcionesCategoria}
           </select>
 
           <select
@@ -518,11 +509,7 @@ export default function DocumentosPage() {
             onChange={(e) => setFiltroCategoria(e.target.value)}
           >
             <option value="todos">Todas las categorías</option>
-            {categorias.map((cat) => (
-              <option key={cat} value={cat}>
-                {cat.replace("_", " ").toUpperCase()}
-              </option>
-            ))}
+            {opcionesCategoria}
           </select>
 
           <select
@@ -577,7 +564,7 @@ export default function DocumentosPage() {
 
               <div className="text-sm space-y-1">
                 <p>
-                  <b>Categoría:</b> {doc.categoria.replace("_", " ")}
+                  <b>Categoría:</b> {etiquetaCategoria(doc.categoria)}
                 </p>
                 <p>
                   <b>Alcance:</b> {doc.alcance}

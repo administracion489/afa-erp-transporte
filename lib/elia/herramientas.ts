@@ -113,6 +113,7 @@ export const RUTAS_MODULO: { href: string; etiqueta: string; modulo: string; ali
   { href: "/crm/pipeline", etiqueta: "Pipeline CRM", modulo: "crm", alias: ["pipeline", "embudo", "leads"] },
   { href: "/crm/agente", etiqueta: "Agente IA del CRM", modulo: "crm", alias: ["agente ia", "afita", "agente crm"] },
   { href: "/cotizaciones/plantillas", etiqueta: "Plantillas PDF", modulo: "cotizaciones", alias: ["plantillas", "plantillas pdf"] },
+  { href: "/licitaciones", etiqueta: "Licitaciones", modulo: "licitaciones", alias: ["licitaciones", "licitacion", "licitación", "propuesta tecnica", "propuesta técnica", "concurso"] },
   { href: "/mantenimiento/planes", etiqueta: "Planes Fabricante", modulo: "mantenimiento", alias: ["planes fabricante", "plan de mantenimiento"] },
   { href: "/despachador", etiqueta: "Despachador", modulo: "despachador", alias: ["despachador", "despacho", "urgentes"] },
   { href: "/calendario", etiqueta: "Calendario", modulo: "dashboard", alias: ["calendario", "agenda"] },
