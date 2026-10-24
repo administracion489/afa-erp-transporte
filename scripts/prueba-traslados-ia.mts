@@ -2844,17 +2844,37 @@ const VIEJO_TL = (() => {
     "Miraflores. Cash App to confirm", "Larco 345. Prepay 50 to confirm", "Larco 345. Settle 50 by Skrill", "send 50 via Revolut to @joe",
     "Hotel Hilton. IBAN in chat", "Miraflores. Swift BCPLPEPL", "Miraflores, remit to my wallet", "Miraflores. MoneyGram the advance",
     "Miraflores, prepayment by crypto", "JW Marriott. Pay 40 CAD to confirm", "Miraflores. 0.01 BTC to confirm", "Miraflores. 50 pounds to confirm",
+    // Segunda revisión S1: el importe en letras junto a la orden de pagar o confirmar.
+    "Send fifty to confirm", "Miraflores. Send one hundred to confirm",
   ];
   const BLOQUEAR_ES = [
     "Miraflores. Envíe £50 por Revolut para confirmar", "Miraflores. Envíe 50 por Skrill para confirmar", "Miraflores. Adelanto en Bitcoin para confirmar",
     "Miraflores. Send £50 to confirm", "Miraflores. Send GBP 50 to confirm", "Larco 345. Prepay 50 to confirm", "Miraflores. Envíe el adelanto a mi billetera",
     "Miraflores. Prepago por cripto", "Miraflores, envía 80 para confirmar", "Miraflores, confirmar con 50", "Miraflores. 50 libras para confirmar", "Miraflores. 30 USDT",
+    // Segunda revisión S1: las MARCAS de pago extranjeras valen también en castellano, y el importe en letras.
+    "Miraflores. Para confirmar: PayPal juanp", "Miraflores. Para confirmar: Revolut @juanp", "Miraflores. Zelle a nombre de Juan Perez",
+    "Miraflores. Western Union a Juan Perez", "Miraflores. MoneyGram a Juan Perez", "Miraflores. Binance juanp", "Miraflores. Venmo @juanp",
+    "Hotel X. Envíe cincuenta para confirmar", "Miraflores. Confirmar con ciento veinte",
   ];
   for (const t of BLOQUEAR_EN) {
     ok(T.textoLibreSospechoso(t, "en") != null && T.referenciaImprimible(t, "en") === null, `en inglés, «${t}» ya no se imprime (${T.textoLibreSospechoso(t, "en")})`);
     ok(VIEJO_TL.textoLibreSospechoso(t, "en") == null || T.textoLibreSospechoso(t, "en") != null, `«${t}»: lo que el viejo bloqueaba se sigue bloqueando`);
   }
   for (const t of BLOQUEAR_ES) ok(T.textoLibreSospechoso(t) != null && T.referenciaImprimible(t) === null && T.textoLibreSospechoso(t, "en") != null, `en castellano (y en inglés), «${t}» ya no se imprime (${T.textoLibreSospechoso(t)})`);
+  // Los tres casos de la segunda revisión, con su motivo.
+  ok(T.textoLibreSospechoso("Miraflores. Para confirmar: PayPal juanp", "es") === "palabra_de_pago", "«Para confirmar: PayPal juanp» en castellano → palabra_de_pago (la marca vale en los dos idiomas)");
+  ok(T.textoLibreSospechoso("Hotel X. Envíe cincuenta para confirmar", "es") === "importe", "«Envíe cincuenta para confirmar» en castellano → importe (el número en letras con la orden)");
+  ok(T.textoLibreSospechoso("Send fifty to confirm", "en") === "importe" && T.textoLibreSospechoso("Send fifty to confirm", "es") === "importe", "«Send fifty to confirm» → importe (en los dos idiomas)");
+  ok(VIEJO_TL.textoLibreSospechoso("Miraflores. Para confirmar: PayPal juanp", "es") == null && VIEJO_TL.textoLibreSospechoso("Hotel X. Envíe cincuenta para confirmar", "es") == null,
+    "…y con el algoritmo viejo pasaban (el escenario es el que se rompió)");
+  // Las palabras GENÉRICAS del inglés siguen siendo solo del inglés: en castellano «pay», «bank», «wire»… no se escriben como dirección.
+  for (const t of ["Miraflores, pay by bank wire", "Hotel, deposit to my account", "Miraflores, prepaid remittance"]) {
+    ok(T.textoLibreSospechoso(t, "en") === "palabra_de_pago" && T.textoLibreSospechoso(t, "es") == null, `«${t}»: palabra de pago en inglés, nada en castellano (genérica, solo inglés)`);
+  }
+  // Un número en letras SIN la orden de pagar o confirmar no es una orden de pago; y una hora en letras tampoco.
+  for (const t of ["Calle Cincuenta 12", "Hotel Ciento Veinte", "Confirmar a las veinte", "Enviar a cincuenta metros del hotel", "Confirm at twenty past ten", "Send twenty five people"]) {
+    ok(T.textoLibreSospechoso(t, "es") == null && T.textoLibreSospechoso(t, "en") == null, `«${t}» se sigue imprimiendo (sin orden de pago, o es una hora o lo que se cuenta)`);
+  }
   ok(T.atencionImprimible("John Revolut 50 to confirm", "en") === null && T.atencionImprimible("John Revolut 50 to confirm") === null,
     "el nombre de perfil «John Revolut 50 to confirm» no sale en «Atención» (en inglés por Revolut; en los dos por el respaldo estructural)");
   ok(VIEJO_TL.atencionImprimible("John Revolut 50 to confirm", "en") === "John Revolut 50 to confirm", "…y con el algoritmo viejo SÍ salía (el escenario es el que se rompió)");
@@ -2899,7 +2919,12 @@ const VIEJO_TL = (() => {
   // La medición de falsos positivos DECLARADA: lo único que el corpus de direcciones pierde son nombres
   // que contienen una palabra nueva de pago (no se encontró ninguno real en Lima; si aparece, el
   // perjuicio es solo que la referencia no se imprime y la cotización la revisa un ejecutivo).
-  const FP_DECLARADOS: [string, "es" | "en"][] = [["Av. El Adelanto 345", "es"], ["Calle Swift 12", "en"], ["Hotel Iban", "en"]];
+  // Segunda revisión S1: las marcas valen en los dos idiomas («Calle Swift», «Hotel Iban» ya tampoco se
+  // imprimen en castellano), y un número en letras con un «confirmar» cuenta como la cifra («Calle Veinte,
+  // confirmar al llegar», igual que «Calle 20, confirmar al llegar»). Medido sobre las DIRECCIONES de
+  // arriba en los dos idiomas: ninguna más deja de imprimirse.
+  const FP_DECLARADOS: [string, "es" | "en"][] = [["Av. El Adelanto 345", "es"], ["Calle Swift 12", "en"], ["Hotel Iban", "en"],
+    ["Calle Swift 12", "es"], ["Hotel Iban", "es"], ["Calle Veinte, confirmar al llegar", "es"], ["Calle Veinte, confirmar al llegar", "en"]];
   for (const [t, id] of FP_DECLARADOS) ok(T.textoLibreSospechoso(t, id) != null && VIEJO_TL.textoLibreSospechoso(t, id) == null, `falso positivo DECLARADO: «${t}» (${id}) ya no se imprime`);
   // «transfer» NUNCA es una palabra de pago (es el servicio que se cotiza), ni con una cifra.
   for (const t of ["Airport transfer", "Transfer 50 to Miraflores", "the transfer is at 10:30", "Hotel transfer 2 pax"]) ok(T.textoLibreSospechoso(t, "en") == null && T.textoLibreSospechoso(t) == null, `«${t}»: «transfer» no es una palabra de pago`);
@@ -2964,7 +2989,8 @@ const VIEJO_TL = (() => {
   //     REALES sembradas en los SQL (castellano e inglés) y el corpus.
   const sqlPol = ["supabase/cotizaciones-06-politica-reserva.sql", "supabase/cotizaciones-08-resumen-condiciones.sql", "supabase/traslados-11-solo-afa-plantillas-ingles.sql", "supabase/traslados-03-precios-afa.sql"]
     .filter((f) => existsSync(f)).flatMap((f) => lits(readFileSync(f, "utf8")));
-  const LINEAS = [...sqlPol, ...CORPUS, "La reserva se confirma con un adelanto del 50 % del precio total.", "Booking requires a 50% prepayment.", "Pay by Revolut or Bitcoin.", "Envíe 50 por Skrill"];
+  const LINEAS = [...sqlPol, ...CORPUS, "La reserva se confirma con un adelanto del 50 % del precio total.", "Booking requires a 50% prepayment.", "Pay by Revolut or Bitcoin.", "Envíe 50 por Skrill",
+    "Aceptamos PayPal y Zelle", "Western Union a nombre de la empresa", "Envíe cincuenta para confirmar"];
   let igualesL = 0, totL = 0, igualesN = 0;
   for (const l of LINEAS) for (const id of ["es", "en"] as const) { totL++; if (JSON.stringify(T.motivosLineaIA(l, id)) === JSON.stringify(VIEJO_TL.motivosLineaIA(l, id))) igualesL++; }
   for (const l of LINEAS) if (T.primerNombreSeguro(l) === VIEJO_TL.primerNombreSeguro(l)) igualesN++;
@@ -3027,7 +3053,8 @@ seccion("27. S1 · hallazgo 3: la guarda del dinero va en el idioma del CLIENTE;
       .map((c, i) => ({ id: `en${i}`, conversacion_id: "cv-1", direccion: "entrante", tipo: "texto", contenido: c, created_at: new Date(reloj - (2 - i) * 60_000).toISOString() }));
     return sb;
   };
-  const destinoPago = "Miraflores, pay by Revolut";
+  // Una palabra de pago GENÉRICA del inglés (las marcas valen ya en los dos idiomas desde la segunda revisión S1).
+  const destinoPago = "Miraflores, pay by bank wire";
   const sbEs = nuevaBase();
   const gEs = await cotizarTrasladoIA(ctxDe(sbEs, "cv-1", "ct-1"), { ...pedidoIA, destino_texto: destinoPago }, depsG);
   ok(gEs.cotizacion?.decision === "automatico", `cliente en castellano: «${destinoPago}» no es sospechoso en castellano y sale solo, como antes (${gEs.cotizacion?.decision})`);
@@ -3035,7 +3062,7 @@ seccion("27. S1 · hallazgo 3: la guarda del dinero va en el idioma del CLIENTE;
   const gEn = await cotizarTrasladoIA(ctxDe(sbEn, "cv-1", "ct-1"), { ...pedidoIA, destino_texto: destinoPago }, depsG);
   const accEn = sbEn.t("crm_acciones_ia")[0], cotEn = sbEn.t("cotizaciones")[0];
   ok(gEn.cotizacion?.decision === "revision" && accEn?.payload?.motivos?.includes("texto_libre_sospechoso"), `cliente en inglés con el inglés apagado: revisión por texto libre (${gEn.cotizacion?.decision} ${accEn?.payload?.motivos})`);
-  ok(cotEn?.destino === "Miraflores" && !/revolut/i.test(JSON.stringify(cotEn?.items_json)), `…y la referencia no se imprime (${cotEn?.destino})`);
+  ok(cotEn?.destino === "Miraflores" && !/wire/i.test(JSON.stringify(cotEn?.items_json)), `…y la referencia no se imprime (${cotEn?.destino})`);
   ok(cotEn?.idioma_pdf === "es" && cotEn?.moneda === "PEN" && gEn.cotizacion?.idioma === "es", "…y todo lo demás sigue en castellano y en soles (el inglés está apagado)");
   // Con un destino limpio, la fila del cliente en inglés (inglés apagado) es la de un cliente en castellano.
   const sbEs2 = nuevaBase(), sbEn2 = conIngles(nuevaBase());
@@ -3162,6 +3189,105 @@ seccion("28. Hallazgo 5: la huella de lo que se imprime, al crear y al reusar; e
     cot.destino = "Miraflores (editado)";
     const r = await reusar(sb);
     ok(r.cotizacion?.yaEnviada === true && !r.envioPendiente, "9: una cotización ya enviada sigue respondiendo «ya te la envié»");
+  }
+
+  // ── Segunda revisión S1 · B: la descripción que ARMA EL CÓDIGO no se juzga entera ──
+  // La descripción lleva la capacidad («hasta 15 pasajeros»); juzgada entera, un «confirmar» o un
+  // «enviar» de la referencia del cliente junto a ese 15 se leía como una orden de pago con cifra, y una
+  // referencia limpia iba a revisión al crearla y en cada reuso.
+  {
+    const LIMPIAS: [string, number, "es" | "en"][] = [
+      ["Hotel Belmond, confirmar en recepción", 12, "es"], ["Casa Andina, confirmar habitación al llegar", 25, "es"],
+      ["Hotel Belmond, confirm at front desk", 12, "en"], ["Edificio azul, enviar al portero", 25, "es"],
+    ];
+    for (const [ref, pax, id] of LIMPIAS) {
+      const pd = pedido({ pax, maletas: 2 });
+      const rr = M.evaluarTraslado(pd, ctx);
+      const cap = rr.vehiculo?.categoria?.capacidad ?? 0;
+      for (const filaIdioma of [undefined, "en"] as const) {
+        const fila = C.filaCotizacionTraslado(rr, { ...entradaDe(pd), destino: ref }, { convId: "c", clienteId: null, atencion: "Ana", config, firma: "f", hoy: HOY, ...(filaIdioma ? { idioma: filaIdioma } : {}) });
+        const desc = fila.items_json[0].descripcion;
+        ok(cap >= 10 && fila.destino === `Miraflores (${ref})` && desc.includes(String(cap)), `B: «${ref}» con la ${rr.vehiculo?.categoria?.nombre} (${cap}) se imprime con su referencia`);
+        ok(T.textoLibreSospechoso(desc, id) === "importe", `B: …y juzgada ENTERA, su descripción salía «importe» (el escenario es el que se rompió: ${T.textoLibreSospechoso(desc, id)})`);
+        ok(C.impresosSospechosos(fila, id).length === 0 && C.impresosSospechosos(fila, "en").length === 0, `B: impresosSospechosos de la fila de la IA → [] (${filaIdioma ?? "es"}, ${JSON.stringify(C.impresosSospechosos(fila, id))})`);
+      }
+    }
+    // De punta a punta: se crea en automático y el reuso sigue en automático.
+    for (const [ref, pax] of LIMPIAS) {
+      const sb = nuevaBase();
+      const p = { ...pedidoIA, pax, destino_texto: `Miraflores, ${ref}` };
+      const r0 = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), p, depsH);
+      const acc = sb.t("crm_acciones_ia")[0];
+      ok(r0.cotizacion?.decision === "automatico" && acc?.payload?.motivos?.length === 0, `B: «${ref}» (${pax} pax) → automático al crear (${r0.cotizacion?.decision} ${acc?.payload?.motivos})`);
+      const r1 = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), p, depsH);
+      ok(r1.cotizacion?.decision === "automatico" && acc.payload.motivos.length === 0, `B: …y al reusarla sigue en automático (${r1.cotizacion?.decision} ${acc.payload.motivos})`);
+    }
+    // Lo que NO se afloja: una descripción editada a mano se juzga ENTERA; y una categoría editada en
+    // `traslado_json` junto con su descripción se juzga por su nombre.
+    const pd = pedido({ pax: 12, maletas: 2 });
+    const fila = C.filaCotizacionTraslado(M.evaluarTraslado(pd, ctx), { ...entradaDe(pd), destino: "Hotel Belmond, confirmar en recepción" }, { convId: "c", clienteId: null, atencion: "Ana", config, firma: "f", hoy: HOY });
+    const conYape = { ...fila, items_json: [{ ...fila.items_json[0], descripcion: `${fila.items_json[0].descripcion} · Yape 987654321` }] };
+    ok(C.impresosSospechosos(conYape).length === 1 && C.impresosSospechosos(conYape)[0].campo === "Descripción del ítem", `B: la descripción editada con «Yape 987654321» se juzga entera (${JSON.stringify(C.impresosSospechosos(conYape))})`);
+    const catYape = { ...fila.traslado_json, categoria: { ...fila.traslado_json.categoria, nombre: "Van Yape 987654321" } };
+    const descCat = fila.items_json[0].descripcion.replace(fila.traslado_json.categoria.nombre, "Van Yape 987654321");
+    const conCat = { ...fila, traslado_json: catYape, items_json: [{ ...fila.items_json[0], descripcion: descCat }] };
+    ok(C.impresosSospechosos(conCat).map((x) => `${x.campo}:${x.motivo}`).join() === "Descripción del ítem (categoría):palabra_de_pago", `B: una categoría editada (y su descripción con ella) se juzga por su nombre (${JSON.stringify(C.impresosSospechosos(conCat))})`);
+    const capRara = { ...fila, traslado_json: { ...fila.traslado_json, categoria: { ...fila.traslado_json.categoria, capacidad: 15.5 } }, items_json: [{ ...fila.items_json[0], descripcion: fila.items_json[0].descripcion.replace("15 pasajeros", "15.5 pasajeros") }] };
+    ok(C.impresosSospechosos(capRara).length === 1, "B: una capacidad que no es un entero de asientos no cuenta como la del código: se juzga entera");
+    ok(C.impresosSospechosos({ ...fila, traslado_json: null }).length === 1, "B: sin `traslado_json` no se reconoce la plantilla: se juzga entera (como antes)");
+    // De punta a punta: la descripción editada con un Yape → revisión.
+    const sb = nuevaBase();
+    const p = { ...pedidoIA, pax: 12, destino_texto: "Miraflores, Hotel Belmond, confirmar en recepción" };
+    await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), p, depsH);
+    const cot = sb.t("cotizaciones")[0], acc = sb.t("crm_acciones_ia")[0];
+    cot.items_json = [{ ...cot.items_json[0], descripcion: `${cot.items_json[0].descripcion} · Yape 987654321` }];
+    const rY = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), p, depsH);
+    ok(rY.cotizacion?.decision === "revision" && !rY.envioPendiente && acc.payload.motivos.includes("editada_a_mano") && acc.payload.motivos.includes("texto_libre_sospechoso"),
+      `B: la descripción editada con «Yape 987654321» → revisión (${acc.payload.motivos})`);
+  }
+
+  // ── Segunda revisión S1 · E: la huella solo si la fila releída es la que escribió la IA ──
+  {
+    const lc: any = { ...leida };
+    ok(C.mismaFilaImpresa(lc, { ...lc }) && C.mismaFilaImpresa(lc, reordenada) && C.mismaFilaImpresa(lc, { ...lc, precio_cliente: String(lc.precio_cliente), estado: "enviado", id: 999 }),
+      "mismaFilaImpresa: la misma fila (con las claves en otro orden, un numeric en texto o lo que no se imprime cambiado) → sí");
+    const sinPlantilla: any = { ...lc }; delete sinPlantilla.plantilla_pdf;
+    ok(C.mismaFilaImpresa(sinPlantilla, { ...sinPlantilla, plantilla_pdf: "corporativo" }) && !C.mismaFilaImpresa(sinPlantilla, { ...sinPlantilla, plantilla_pdf: "otra" }),
+      "mismaFilaImpresa: lo que la IA no escribió puede volver con el valor por defecto de su columna (plantilla_pdf = corporativo), con otro no");
+    ok(!C.mismaFilaImpresa(lc, { ...lc, destino: "Miraflores (editado)" }) && !C.mismaFilaImpresa(lc, { ...lc, hora_ida: "07:00" })
+      && !C.mismaFilaImpresa(lc, { ...lc, items_json: [{ ...lc.items_json[0], precio_unit: 1 }] }) && !C.mismaFilaImpresa(lc, null) && !C.mismaFilaImpresa(null, lc),
+      "mismaFilaImpresa: un campo impreso distinto (o una fila que falta) → no");
+    // De punta a punta: alguien edita la fila entre el INSERT y la relectura de la huella.
+    const crearEditandoEnMedio = async (editar: (f: any) => void) => {
+      const sb = nuevaBase();
+      const ins = sb.from.bind(sb);
+      let insertada = false, releer = 0;
+      (sb as any).from = (tabla: string) => {
+        const q = ins(tabla);
+        if (tabla === "cotizaciones") {
+          const insq = q.insert.bind(q); q.insert = (v: any) => { insertada = true; return insq(v); };
+          const ms = q.maybeSingle.bind(q);
+          q.maybeSingle = () => { if (q.op === "select" && insertada && releer++ === 0) editar(sb.t("cotizaciones")[0]); return ms(); };
+        }
+        return q;
+      };
+      const r = await cotizarTrasladoIA(ctxDe(sb, "cv-1", "ct-1"), pedidoIA, depsH);
+      (sb as any).from = ins;
+      return { sb, r, acc: sb.t("crm_acciones_ia")[0] };
+    };
+    for (const [nom, editar] of [
+      ["el destino con una instrucción de pago", (f: any) => { f.destino = "Miraflores (Hotel. Send £50 to confirm)"; }],
+      ["la hora", (f: any) => { f.hora_ida = "07:00"; }],
+    ] as [string, (f: any) => void][]) {
+      const { sb, r, acc } = await crearEditandoEnMedio(editar);
+      ok(r.accion === "cotizar" && !!acc && !("huella" in acc.payload), `E: editada (${nom}) entre el INSERT y la relectura → la acción nace SIN huella`);
+      ok(r.cotizacion?.decision === "revision" && !r.envioPendiente && acc.payload.motivos.includes("editada_a_mano"), `E: …y ya al crearla va a revisión (${r.cotizacion?.decision} ${acc.payload.motivos})`);
+      const r2 = await reusar(sb);
+      ok(r2.cotizacion?.decision === "revision" && acc.payload.motivos.includes("editada_a_mano") && !("huella" in acc.payload), `E: …y su reuso también (${acc.payload.motivos})`);
+    }
+    // Sin edición de por medio, la huella nace igual que antes (el caso 1).
+    const { acc: acc0, sb: sb0 } = await crearEditandoEnMedio(() => {});
+    ok(/^[0-9a-f]{64}$/.test(acc0.payload.huella) && acc0.payload.huella === CD.huellaImprimible(sb0.t("cotizaciones")[0] as any), "E: sin edición entre medio, la huella nace como siempre");
   }
 }
 

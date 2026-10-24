@@ -49,7 +49,7 @@ import { validarEntrada, type EntradaSimulador, type LugarEntrada } from "./api"
 import { cargarCatalogo, leerConfigIA, leerIgvPct, SinMigracionTraslados, type CatalogoTraslados } from "./datos";
 import { leerInglesTraslado, plantillaParaTraslado } from "./plantilla-traslado-datos";
 import {
-  canonImprimible, cifrasDeFila, cuadraConMotor, filaCotizacionTraslado, impresosSospechosos, resultadoDeFila,
+  canonImprimible, cifrasDeFila, cuadraConMotor, filaCotizacionTraslado, impresosSospechosos, mismaFilaImpresa, resultadoDeFila,
   type FilaCotizacion, type FilaCotizacionLeida,
 } from "./cotizacion-traslado";
 import {
@@ -352,13 +352,17 @@ async function cotizarInterno(ctx: CtxCotizarIA, input: unknown, deps: DepsCotiz
   const leida: FilaCotizacionLeida = { ...(guardada as FilaCotizacion), id: ins.id, numero_cotizacion: ins.numero, created_at: ins.created_at, ...(ins.condiciones_token ? { condiciones_token: ins.condiciones_token } : {}) };
   // La HUELLA de lo que se imprime, sobre la fila LEÍDA de la base (la misma lectura con que se
   // compara al reusarla): queda en la acción. Si no se puede leer, la acción nace sin huella y, si
-  // este pedido se reusa, irá a revisión (`editada_a_mano`): no se puede comprobar.
+  // este pedido se reusa, irá a revisión (`editada_a_mano`): no se puede comprobar. Y si la releída
+  // NO imprime lo mismo que la que escribió la IA (`mismaFilaImpresa`: alguien la editó entre el
+  // INSERT y la relectura), tampoco hay huella —esa fila no es «la de la IA»— y va a revisión ya.
   let huella: string | null = null;
+  let editada = false;
   try {
     const releida = await leerCotizacionTraslado(sb, ins.id);
-    huella = releida ? huellaImprimible(releida) : null;
+    if (releida && mismaFilaImpresa(leida, releida)) huella = huellaImprimible(releida);
+    else if (releida) editada = true;
   } catch { huella = null; }
-  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo: sim.catalogo, firma, textos, libres, pedido, nota: r.explicacion.join("\n"), guarda, huella });
+  return decidirYRegistrar(ctx, deps, { leida, resultado: r, catalogo: sim.catalogo, firma, textos, libres, pedido, nota: r.explicacion.join("\n"), guarda, huella, ...(editada ? { editada } : {}) });
 }
 
 /** El sha256 (hex) de lo que imprime la fila (`canonImprimible`): la huella que queda en la acción al crearla. */

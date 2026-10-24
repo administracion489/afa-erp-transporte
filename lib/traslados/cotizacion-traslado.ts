@@ -240,6 +240,26 @@ function nombreLugar(l: LugarEntrada, z: Zona, idioma: Idioma = "es", guarda: Id
 const recortar = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
 
 /**
+ * La descripción del ítem que ARMA EL CÓDIGO: el recojo y el destino ya impresos (`nombreLugar`), el
+ * nombre de la categoría y su capacidad. Una sola definición para quien la escribe
+ * (`filaCotizacionTraslado`) y quien la reconoce al juzgar la fila (`impresosSospechosos`).
+ */
+function descripcionItemTraslado(
+  idioma: Idioma,
+  sentido: "ida" | "ida_retorno",
+  origen: string,
+  destino: string,
+  cat: { nombre: string; capacidad: number },
+): string {
+  return recortar(
+    idioma === "en"
+      ? `TRANSFER ${sentido === "ida_retorno" ? "ROUND TRIP" : "ONE WAY"} · ${origen} – ${destino} · ${cat.nombre} (up to ${cat.capacidad} passengers) · price per leg`
+      : `TRASLADO ${sentido === "ida_retorno" ? "IDA Y RETORNO" : "SOLO IDA"} · ${origen} – ${destino} · ${cat.nombre} (hasta ${cat.capacidad} pasajeros) · precio por tramo`,
+    MAX_DESCRIPCION,
+  );
+}
+
+/**
  * La fila de `cotizaciones` de un traslado cotizable. LANZA si el resultado no es cotizable: el
  * llamador solo crea una cotización con precio, y una fila sin él no tiene arreglo silencioso.
  *
@@ -278,12 +298,7 @@ export function filaCotizacionTraslado(
   const guarda: IdiomaTexto = idioma === "en" || x.guarda === "en" ? "en" : "es";
   const origen = nombreLugar(e.origen, zo, idioma, guarda);
   const destino = nombreLugar(e.destino, zd, idioma, guarda);
-  const descripcion = recortar(
-    idioma === "en"
-      ? `TRANSFER ${sentido === "ida_retorno" ? "ROUND TRIP" : "ONE WAY"} · ${origen} – ${destino} · ${cat.nombre} (up to ${cat.capacidad} passengers) · price per leg`
-      : `TRASLADO ${sentido === "ida_retorno" ? "IDA Y RETORNO" : "SOLO IDA"} · ${origen} – ${destino} · ${cat.nombre} (hasta ${cat.capacidad} pasajeros) · precio por tramo`,
-    MAX_DESCRIPCION,
-  );
+  const descripcion = descripcionItemTraslado(idioma, sentido, origen, destino, cat);
   const items: ItemTraslado[] = [{ descripcion, dias: 1, cantidad: p.tramos, precio_unit: precioUnitPen, descuento_pct: 0, pax_contratado: null }];
   const totPen = totalesEnMoneda(items, "PEN", null, true)!;
   const consideraciones = considDeTraslado(x.plantilla ?? null, x.config, p.moneda);
@@ -872,11 +887,49 @@ const comoNumero = (x: unknown): unknown => {
 export function canonImprimible(fila: Partial<Record<(typeof CAMPOS_HUELLA)[number], unknown>> | null | undefined): string {
   const f = (fila ?? {}) as Record<string, unknown>;
   const o: Record<string, unknown> = {};
-  for (const k of CAMPOS_HUELLA) {
-    const val = f[k] ?? null;
-    o[k] = k === "precio_cliente" || k === "tipo_cambio" || k === "cliente_id" ? comoNumero(val) : val;
-  }
+  for (const k of CAMPOS_HUELLA) o[k] = valorHuella(k, f[k]);
   return JSON.stringify(canon(o));
+}
+
+/** El valor de un campo de la huella tal como se compara: null si falta, y las columnas numeric como número. */
+const valorHuella = (k: (typeof CAMPOS_HUELLA)[number], v: unknown): unknown => {
+  const val = v ?? null;
+  return k === "precio_cliente" || k === "tipo_cambio" || k === "cliente_id" ? comoNumero(val) : val;
+};
+
+/**
+ * Los valores por DEFECTO de las columnas de `cotizaciones` que la fila de la IA puede no escribir
+ * (verificados contra producción el 24-10-2026): sin plantilla, la base pone `plantilla_pdf =
+ * 'corporativo'`, y así con las demás. Solo los usa `mismaFilaImpresa`.
+ */
+const DEFECTO_COLUMNA: Partial<Record<(typeof CAMPOS_HUELLA)[number], unknown>> = {
+  plantilla_pdf: "corporativo", idioma_pdf: "es", moneda: "PEN", tipo_servicio: "solo_ida", incluye_igv: true, precio_cliente: 0,
+};
+
+/**
+ * ¿La fila RELEÍDA de la base (con la que se saca la huella al crearla) imprime lo mismo que la que
+ * acaba de escribir la IA? Campo por campo de `CAMPOS_HUELLA`: lo que la IA escribió tiene que volver
+ * igual (en JSON canónico; un numeric en texto vale como número); lo que no escribió, vacío o con el
+ * valor por defecto de su columna. Si no, alguien la editó entre el INSERT y la relectura, y la
+ * huella de esa fila no puede pasar por «la de la IA». PURO.
+ */
+export function mismaFilaImpresa(
+  local: Partial<Record<(typeof CAMPOS_HUELLA)[number], unknown>> | null | undefined,
+  releida: Partial<Record<(typeof CAMPOS_HUELLA)[number], unknown>> | null | undefined,
+): boolean {
+  if (!local || !releida) return false;
+  const l = local as Record<string, unknown>, r = releida as Record<string, unknown>;
+  const igual = (k: (typeof CAMPOS_HUELLA)[number], a: unknown, b: unknown) =>
+    JSON.stringify(canon(valorHuella(k, a))) === JSON.stringify(canon(valorHuella(k, b)));
+  for (const k of CAMPOS_HUELLA) {
+    if (l[k] === undefined) {
+      if (r[k] == null) continue;
+      if (k in DEFECTO_COLUMNA && igual(k, r[k], DEFECTO_COLUMNA[k])) continue;
+      return false;
+    }
+    if (!igual(k, l[k], r[k])) return false;
+  }
+  return true;
 }
 
 /**
@@ -885,9 +938,15 @@ export function canonImprimible(fila: Partial<Record<(typeof CAMPOS_HUELLA)[numb
  * (castellano ∪ inglés con «en»). El largo no cuenta: el código los arma con el nombre de la zona, la
  * categoría y la referencia del cliente, y pasan de 80 caracteres con toda normalidad. Lo que la IA
  * escribió al crearla nunca es sospechoso (lo sospechoso no se imprime); lo que alguien editó, puede.
+ *
+ * La descripción que es EXACTAMENTE la que arma el código (`esDescripcionDelCodigo`: la plantilla con
+ * el recojo y el destino de la fila y la categoría de `traslado_json`) no se juzga entera —el recojo y
+ * el destino ya se juzgaron, y la capacidad («hasta 15 pasajeros») junto a un «confirmar» de la
+ * referencia se leería como una orden de pago con cifra—: se juzga solo el NOMBRE de la categoría, la
+ * única pieza que no se miró. Cualquier otra descripción (editada a mano) se juzga entera.
  */
 export function impresosSospechosos(
-  fila: Pick<FilaCotizacionLeida, "origen" | "destino" | "items_json"> | null | undefined,
+  fila: Pick<FilaCotizacionLeida, "origen" | "destino" | "items_json"> & Partial<Pick<FilaCotizacionLeida, "tipo_servicio" | "traslado_json">> | null | undefined,
   idioma: IdiomaTexto = "es",
 ): { campo: string; motivo: MotivoTextoLibre }[] {
   if (!fila) return [];
@@ -899,6 +958,34 @@ export function impresosSospechosos(
   mirar("Recojo impreso", fila.origen);
   mirar("Destino impreso", fila.destino);
   const items = Array.isArray(fila.items_json) ? (fila.items_json as { descripcion?: unknown }[]) : [];
-  items.forEach((it, i) => mirar(items.length > 1 ? `Descripción del ítem ${i + 1}` : "Descripción del ítem", it?.descripcion));
+  items.forEach((it, i) => {
+    const campo = items.length > 1 ? `Descripción del ítem ${i + 1}` : "Descripción del ítem";
+    const cat = esDescripcionDelCodigo(fila, it?.descripcion);
+    if (cat) mirar(`${campo} (categoría)`, cat.nombre);
+    else mirar(campo, it?.descripcion);
+  });
   return out;
+}
+
+/**
+ * La categoría con que el CÓDIGO habría armado esta descripción a partir de la fila (en cualquiera de
+ * los dos idiomas), o null si la descripción no es esa: editada a mano, con una categoría o una
+ * capacidad que no son las de `traslado_json`, o una capacidad que no es un número entero de asientos.
+ * PURO.
+ */
+function esDescripcionDelCodigo(
+  fila: Pick<FilaCotizacionLeida, "origen" | "destino"> & Partial<Pick<FilaCotizacionLeida, "tipo_servicio" | "traslado_json">>,
+  descripcion: unknown,
+): { nombre: string; capacidad: number } | null {
+  if (typeof descripcion !== "string" || !descripcion) return null;
+  const c = fila.traslado_json?.categoria;
+  if (!c || typeof c.nombre !== "string" || !c.nombre.trim()) return null;
+  if (typeof c.capacidad !== "number" || !Number.isInteger(c.capacidad) || c.capacidad < 1 || c.capacidad > 999) return null;
+  if (typeof fila.origen !== "string" || typeof fila.destino !== "string") return null;
+  const cat = { nombre: c.nombre, capacidad: c.capacidad };
+  const sentido: "ida" | "ida_retorno" = fila.tipo_servicio === "ida_retorno" ? "ida_retorno" : "ida";
+  for (const id of ["es", "en"] as const) {
+    if (descripcionItemTraslado(id, sentido, fila.origen, fila.destino, cat) === descripcion) return cat;
+  }
+  return null;
 }

@@ -317,25 +317,42 @@ const FRASES_PAGO_INGLES = ["western union"];
 
 /**
  * Las que se SUMARON en la revisión S1 (23-10-2026), SOLO para el texto libre (recojo, destino, nombre
- * del contacto, nombre del pasajero): servicios de envío de dinero y criptomonedas, y el «adelanto».
- * Las condiciones de la plantilla (`motivosLineaIA`) siguen con las listas de antes: «adelanto» y
- * «prepayment» son las palabras con que toda política de reserva describe el adelanto, y marcarlas
- * pintaría de ámbar la política de cada empresa (y un aviso que sale siempre se vuelve paisaje).
+ * del contacto, nombre del pasajero): el «adelanto», criptomonedas y billeteras. Las condiciones de la
+ * plantilla (`motivosLineaIA`) siguen con las listas de antes: «adelanto» y «prepayment» son las
+ * palabras con que toda política de reserva describe el adelanto, y marcarlas pintaría de ámbar la
+ * política de cada empresa (y un aviso que sale siempre se vuelve paisaje).
  */
 const PALABRAS_PAGO_MAS = ["adelanto", "adelantos", "prepago", "prepagos", "cripto", "criptos", "criptomoneda", "criptomonedas", "billetera", "billeteras"];
-const PALABRAS_PAGO_INGLES_MAS = [
-  "revolut", "skrill", "bitcoin", "bitcoins", "btc", "crypto", "cryptos", "cryptocurrency", "usdt", "wallet", "wallets",
-  "iban", "swift", "moneygram", "cashapp", "remit", "remittance", "prepay", "prepaid", "prepayment",
+/**
+ * Las MARCAS y servicios de envío de dinero (segunda revisión S1, 24-10-2026): en el texto libre valen
+ * en LOS DOS idiomas, porque son nombres propios y se escriben igual en un chat en castellano («Para
+ * confirmar: PayPal juanp», «Zelle a nombre de Juan Pérez», «Western Union a Juan Pérez»). Yape y Plin
+ * ya están en `PALABRAS_PAGO`.
+ */
+const MARCAS_PAGO = [
+  "paypal", "zelle", "venmo", "revolut", "skrill", "binance", "bitcoin", "bitcoins", "btc", "crypto", "cryptos", "cryptocurrency",
+  "usdt", "wallet", "wallets", "iban", "swift", "moneygram", "cashapp",
 ];
-const FRASES_PAGO_INGLES_MAS = ["cash app", "money gram"];
+const FRASES_MARCAS_PAGO = ["western union", "cash app", "money gram"];
+/**
+ * Las palabras GENÉRICAS del inglés que se sumaron en S1, solo con `idioma = "en"` (en castellano
+ * «remit» o «prepaid» no se escriben, y las de `PALABRAS_PAGO_INGLES` —«pay», «bank», «account»,
+ * «deposit», «wire»— tampoco).
+ */
+const PALABRAS_PAGO_INGLES_MAS = ["remit", "remittance", "prepay", "prepaid", "prepayment"];
 
-/** `mas` = con las palabras de la revisión S1 (el texto libre); sin él, las listas de antes (las condiciones). */
+/**
+ * `mas` = con las palabras de la revisión S1 (el texto libre); sin él, las listas de antes (las
+ * condiciones), byte a byte: en castellano solo `PALABRAS_PAGO`; en inglés, además
+ * `PALABRAS_PAGO_INGLES` y «western union».
+ */
 const traePalabraDePago = (crudo: string, idioma: IdiomaTexto, mas = false): boolean => {
   const pal = porPalabra(crudo);
   const hay = (ls: readonly string[]) => ls.some((p) => pal.includes(` ${p} `));
-  if (hay(PALABRAS_PAGO) || (mas && hay(PALABRAS_PAGO_MAS))) return true;
+  if (hay(PALABRAS_PAGO)) return true;
+  if (mas && (hay(PALABRAS_PAGO_MAS) || hay(MARCAS_PAGO) || hay(FRASES_MARCAS_PAGO))) return true;
   if (idioma !== "en") return false;
-  return hay(PALABRAS_PAGO_INGLES) || hay(FRASES_PAGO_INGLES) || (mas && (hay(PALABRAS_PAGO_INGLES_MAS) || hay(FRASES_PAGO_INGLES_MAS)));
+  return hay(PALABRAS_PAGO_INGLES) || hay(FRASES_PAGO_INGLES) || (mas && hay(PALABRAS_PAGO_INGLES_MAS));
 };
 
 /**
@@ -353,13 +370,24 @@ const VERBOS_ORDEN_PAGO = [
 /** Fechas y horas: no son el importe de una instrucción de pago («confirm at 10:30», «el 25/12/2026»). */
 const FECHAS_Y_HORAS = /\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/g;
 /**
- * EL RESPALDO ESTRUCTURAL de la revisión S1: una cifra de 2 o más dígitos (sin contar fechas ni
- * horas) junto a un verbo que ordena pagar o confirmar. «Prepay 50 to confirm», «John Revolut 50 to
- * confirm», «Envíe 50 por Skrill para confirmar»: una instrucción de pago aunque no nombre la moneda
- * ni un servicio que la lista conozca. Una dirección con número y sin esos verbos se imprime igual.
+ * Un importe EN LETRAS, en castellano o en inglés, que no es una hora ni lo que cuenta otra cosa
+ * (personas, maletas, días…): «cincuenta», «ciento cincuenta», «fifty», «one hundred». Las mismas
+ * piezas de `mencionaDinero`; un «dos» o un «one» sueltos no cuentan.
+ */
+const IMPORTE_EN_LETRAS = new RegExp(
+  String.raw`\b(?:${NO_ES_HORA}${LETRAS_IMPORTE}(?!\s*(?:${NO_ES_DINERO_LETRAS}))|${NO_ES_HORA_INGLES}${LETRAS_IMPORTE_INGLES}(?!\s*(?:${NO_ES_DINERO_INGLES})))`,
+);
+/**
+ * EL RESPALDO ESTRUCTURAL de la revisión S1: una cifra de 2 o más dígitos o un importe en letras (sin
+ * contar fechas ni horas) junto a un verbo que ordena pagar o confirmar. «Prepay 50 to confirm», «John
+ * Revolut 50 to confirm», «Envíe 50 por Skrill para confirmar», «Envíe cincuenta para confirmar»,
+ * «Send fifty to confirm»: una instrucción de pago aunque no nombre la moneda ni un servicio que la
+ * lista conozca. Una dirección con número y sin esos verbos se imprime igual. Vale igual en los dos
+ * idiomas (los verbos y los números de las dos listas).
  */
 const ordenDePagoConCifra = (crudo: string): boolean => {
-  if (!/\d{2,}/.test(minusculas(crudo).replace(FECHAS_Y_HORAS, " "))) return false;
+  const t = minusculas(crudo).replace(FECHAS_Y_HORAS, " ");
+  if (!/\d{2,}/.test(t) && !IMPORTE_EN_LETRAS.test(t)) return false;
   const pal = porPalabra(crudo);
   return VERBOS_ORDEN_PAGO.some((v) => pal.includes(` ${v} `));
 };
